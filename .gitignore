@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Data files (user data — never commit these)
+data/
+
+# Uploaded images (user data — never commit these)
+uploads/
+
+# Atomic write temp files (leftover if process crashes mid-write)
+*.tmp
+
+# Development backup files
+*.backup
+
+# Environment variables
+.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
