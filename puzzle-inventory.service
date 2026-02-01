@@ -1,0 +1,29 @@
+[Unit]
+Description=Puzzle Inventory App
+After=network.target
+
+[Service]
+Type=simple
+# Run as your regular user — change this to your actual username
+User=your_username
+Group=your_username
+
+# Absolute path to the app directory — change this to where you put the app
+WorkingDirectory=/opt/puzzle-inventory
+
+# Start the server
+ExecStart=/usr/bin/node server.js
+
+# Restart automatically if the process crashes
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown: give it 10s to finish any pending writes before force-killing
+TimeoutStopSec=10
+
+# Log to systemd journal (view with: journalctl -u puzzle-inventory)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
