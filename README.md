@@ -6,6 +6,10 @@ A web-based inventory system for tracking jigsaw puzzles. Runs on Node.js with a
 
 ---
 
+![Dashboard](screenshots/dashboard.png)
+
+---
+
 ## Quick Start
 
 ```bash
