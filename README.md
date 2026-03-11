@@ -173,5 +173,8 @@ All endpoints return JSON. Errors come back as `{ error: "message" }` with an ap
 - Wishlist product links are now only rendered as clickable anchors if the URL starts with `http://` or `https://`, preventing `javascript:` URL injection
 - Image gallery onclick handlers no longer inject image URLs directly into HTML attribute strings; they now use index-based lookup to avoid attribute injection
 
+**New features:**
+- Dark mode toggle added to Settings → Theme section; preference is saved in `localStorage` and persists across sessions
+
 ### SEHv1.01 — initial release
 - Initial public release
