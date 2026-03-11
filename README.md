@@ -2,7 +2,7 @@
 
 A web-based inventory system for tracking jigsaw puzzles. Runs on Node.js with a simple Express server and stores everything as JSON files — no database needed.
 
-**Version:** SEHv1.01
+**Version:** SEHv1.02
 
 ---
 
@@ -136,7 +136,7 @@ All endpoints return JSON. Errors come back as `{ error: "message" }` with an ap
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/puzzles/:id/custom-fields` | Add a custom field (label and value required) |
+| POST | `/api/puzzles/:id/custom-fields` | Add a custom field (name and value required) |
 | DELETE | `/api/puzzles/:id/custom-fields/:fieldId` | Delete a custom field |
 
 ### Wishlist
@@ -156,3 +156,22 @@ All endpoints return JSON. Errors come back as `{ error: "message" }` with an ap
 | PUT | `/api/settings` | Save settings |
 | GET | `/api/theme` | Get UI theme colors |
 | PUT | `/api/theme` | Save UI theme colors |
+
+---
+
+## Changelog
+
+### SEHv1.02 — 2026-03-11
+**Bug fixes:**
+- Completion log ratings were always saved as 0 — star rating input is now wired up correctly for both new logs and the initial log on puzzle creation
+- Added missing star rating UI to the completion log modal and initial log section
+- Rating is now correctly restored when editing an existing log entry
+- Custom fields always failed with a 400 error — server was expecting a field named `label` but the client was sending `name`; both sides now use `name`
+- Thumbnail index could go out of bounds after deleting an image (especially if the deleted image came before the thumbnail); server now clamps the index after deletion, and the client renders defensively as well
+- Image upload errors were silently treated as success; the handler now checks the response status and shows an error alert on failure
+- XSS: added `escapeHtml()` and applied it to all user-supplied data rendered into the page (puzzle names, brands, themes, notes, custom field values, wishlist fields, etc.)
+- Wishlist product links are now only rendered as clickable anchors if the URL starts with `http://` or `https://`, preventing `javascript:` URL injection
+- Image gallery onclick handlers no longer inject image URLs directly into HTML attribute strings; they now use index-based lookup to avoid attribute injection
+
+### SEHv1.01 — initial release
+- Initial public release
