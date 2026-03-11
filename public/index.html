@@ -1622,6 +1622,16 @@
                         </div>
                     </div>
                     <div class="form-group">
+                        <label>Rating</label>
+                        <div class="rating" id="initialLogRating">
+                            <span class="star" onclick="setInitialLogRating(1)">★</span>
+                            <span class="star" onclick="setInitialLogRating(2)">★</span>
+                            <span class="star" onclick="setInitialLogRating(3)">★</span>
+                            <span class="star" onclick="setInitialLogRating(4)">★</span>
+                            <span class="star" onclick="setInitialLogRating(5)">★</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
                         <label>Notes about this completion</label>
                         <textarea id="initialLogNotes" placeholder="Any notes about completing this puzzle?"></textarea>
                     </div>
@@ -1659,6 +1669,16 @@
                             <input type="number" id="logSeconds" min="0" max="59" placeholder="0" value="0">
                             <label>Seconds</label>
                         </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Rating</label>
+                    <div class="rating" id="logRating">
+                        <span class="star" onclick="setLogRating(1)">★</span>
+                        <span class="star" onclick="setLogRating(2)">★</span>
+                        <span class="star" onclick="setLogRating(3)">★</span>
+                        <span class="star" onclick="setLogRating(4)">★</span>
+                        <span class="star" onclick="setLogRating(5)">★</span>
                     </div>
                 </div>
                 <div class="form-group">

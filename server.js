@@ -366,6 +366,10 @@ app.delete('/api/puzzles/:id/images/:imageIndex', async (req, res) => {
         }
         
         puzzle.images.splice(imageIndex, 1);
+        // Keep thumbnailIndex in bounds after deletion
+        if (puzzle.thumbnailIndex >= puzzle.images.length) {
+            puzzle.thumbnailIndex = Math.max(0, puzzle.images.length - 1);
+        }
         await writePuzzles(puzzles);
         res.json({ success: true });
     } catch (error) {
@@ -625,19 +629,19 @@ app.post('/api/puzzles/:id/custom-fields', async (req, res) => {
         }
 
         // Validation
-        const label = (req.body.label || '').trim();
+        const label = (req.body.name || '').trim();
         const value = (req.body.value || '').trim();
         if (!label) {
-            return res.status(400).json({ error: 'Custom field label is required' });
+            return res.status(400).json({ error: 'Custom field name is required' });
         }
         if (!value) {
             return res.status(400).json({ error: 'Custom field value is required' });
         }
-        
+
         const newField = {
             id: Date.now(),
             ...req.body,
-            label: label,
+            name: label,
             value: value
         };
         

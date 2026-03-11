@@ -3,6 +3,16 @@ let currentPuzzleId = null;
 let currentRating = 0;
 let currentLogRating = 0;
 let initialLogRating = 0;
+
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 let editingPuzzleId = null;
 let editingWishlistId = null;
 let wishlistItems = [];
@@ -151,23 +161,24 @@ function renderWishlist() {
         const priorityClass = `priority-${item.priority}`;
         const priorityText = item.priority.charAt(0).toUpperCase() + item.priority.slice(1);
         const priceFormatted = item.price ? `$${parseFloat(item.price).toFixed(2)} USD` : '';
-        const urlLink = item.url ? `<p><strong>Link:</strong> <a href="${item.url}" target="_blank" style="color: var(--primary-color); text-decoration: underline;">View Product</a></p>` : '';
-        
+        const safeUrl = item.url && /^https?:\/\//i.test(item.url) ? item.url : null;
+        const urlLink = safeUrl ? `<p><strong>Link:</strong> <a href="${escapeHtml(safeUrl)}" target="_blank" style="color: var(--primary-color); text-decoration: underline;">View Product</a></p>` : '';
+
         return `
             <div class="wishlist-card">
-                <h3>${item.name}</h3>
-                ${item.brand ? `<p><strong>Brand:</strong> ${item.brand}</p>` : ''}
-                ${item.pieces ? `<p><strong>Pieces:</strong> ${item.pieces}</p>` : ''}
-                ${item.theme ? `<p><strong>Theme:</strong> ${item.theme}</p>` : ''}
-                ${item.whereToBuy ? `<p><strong>Where to Buy:</strong> ${item.whereToBuy}</p>` : ''}
+                <h3>${escapeHtml(item.name)}</h3>
+                ${item.brand ? `<p><strong>Brand:</strong> ${escapeHtml(item.brand)}</p>` : ''}
+                ${item.pieces ? `<p><strong>Pieces:</strong> ${escapeHtml(String(item.pieces))}</p>` : ''}
+                ${item.theme ? `<p><strong>Theme:</strong> ${escapeHtml(item.theme)}</p>` : ''}
+                ${item.whereToBuy ? `<p><strong>Where to Buy:</strong> ${escapeHtml(item.whereToBuy)}</p>` : ''}
                 ${urlLink}
-                ${priceFormatted ? `<p><strong>Price:</strong> ${priceFormatted}</p>` : ''}
-                ${item.notes ? `<p style="margin-top: 10px;"><em>${item.notes}</em></p>` : ''}
+                ${priceFormatted ? `<p><strong>Price:</strong> ${escapeHtml(priceFormatted)}</p>` : ''}
+                ${item.notes ? `<p style="margin-top: 10px;"><em>${escapeHtml(item.notes)}</em></p>` : ''}
                 <div style="margin-top: 15px; display: flex; gap: 10px;">
                     <button class="btn btn-secondary" style="padding: 8px 16px; font-size: 14px;" onclick="editWishlistItem(${item.id})">Edit</button>
                     <button class="btn btn-danger" style="padding: 8px 16px; font-size: 14px;" onclick="deleteWishlistItem(${item.id})">Remove</button>
                 </div>
-                <span class="priority ${priorityClass}">${priorityText} Priority</span>
+                <span class="priority ${priorityClass}">${escapeHtml(priorityText)} Priority</span>
             </div>
         `;
     }).join('');
@@ -590,21 +601,21 @@ function renderDashboard() {
             `;
         } else {
             gridContainer.innerHTML = recentPuzzles.map(puzzle => {
-                const thumbnailIndex = puzzle.thumbnailIndex || 0;
-                const thumbnail = puzzle.images && puzzle.images.length > 0 
-                    ? `<img src="${puzzle.images[thumbnailIndex]}" alt="${puzzle.name}" class="recent-puzzle-image">`
+                const thumbnailIndex = Math.min(puzzle.thumbnailIndex || 0, (puzzle.images && puzzle.images.length > 0 ? puzzle.images.length - 1 : 0));
+                const thumbnail = puzzle.images && puzzle.images.length > 0
+                    ? `<img src="${escapeHtml(puzzle.images[thumbnailIndex])}" alt="${escapeHtml(puzzle.name)}" class="recent-puzzle-image">`
                     : `<div class="recent-puzzle-image">🧩</div>`;
-                
+
                 const stars = '★'.repeat(puzzle.rating || 0) + '☆'.repeat(5 - (puzzle.rating || 0));
                 const donatedBadge = puzzle.donated ? '<span style="background: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; margin-top: 5px; display: inline-block;">✓ Donated</span>' : '';
-                
+
                 return `
                     <div class="recent-puzzle-card" onclick="showPuzzleDetail(${puzzle.id})">
                         ${thumbnail}
                         <div class="recent-puzzle-info">
-                            <h4>${puzzle.name}</h4>
-                            <p><strong>${puzzle.pieces} pieces</strong></p>
-                            ${puzzle.brand ? `<p>${puzzle.brand}</p>` : ''}
+                            <h4>${escapeHtml(puzzle.name)}</h4>
+                            <p><strong>${escapeHtml(String(puzzle.pieces))} pieces</strong></p>
+                            ${puzzle.brand ? `<p>${escapeHtml(puzzle.brand)}</p>` : ''}
                             <p style="color: #ffc107; font-size: 1.1em; margin-top: 5px;">${stars}</p>
                             ${donatedBadge}
                         </div>
@@ -724,7 +735,9 @@ function showAddPuzzleModal() {
     document.getElementById('initialLogMinutes').value = '0';
     document.getElementById('initialLogSeconds').value = '0';
     document.getElementById('initialLogNotes').value = '';
-    
+    initialLogRating = 0;
+    updateInitialLogRatingDisplay();
+
     showModal('puzzleModal');
 }
 
@@ -879,7 +892,6 @@ async function savePuzzle(event) {
                 
                 if (!imageResponse.ok) {
                     console.error('Failed to upload images');
-                } else {
                 }
             }
             
@@ -894,7 +906,7 @@ async function savePuzzle(event) {
                 const logData = {
                     date: document.getElementById('initialLogDate').value,
                     time: totalHours,
-                    rating: 0,
+                    rating: initialLogRating,
                     notes: document.getElementById('initialLogNotes').value
                 };
                 
@@ -960,17 +972,17 @@ function renderPuzzleList() {
     }
 
     listContainer.innerHTML = puzzles.map(puzzle => {
-        const thumbnailIndex = puzzle.thumbnailIndex || 0;
+        const thumbnailIndex = Math.min(puzzle.thumbnailIndex || 0, (puzzle.images && puzzle.images.length > 0 ? puzzle.images.length - 1 : 0));
         const thumbnail = puzzle.images && puzzle.images.length > 0
-            ? `<img src="${puzzle.images[thumbnailIndex]}" alt="${puzzle.name}" class="puzzle-item-thumbnail">`
+            ? `<img src="${escapeHtml(puzzle.images[thumbnailIndex])}" alt="${escapeHtml(puzzle.name)}" class="puzzle-item-thumbnail">`
             : `<div class="puzzle-item-thumbnail">🧩</div>`;
-        
+
         return `
             <div class="puzzle-item ${puzzle.id === currentPuzzleId ? 'active' : ''}" onclick="showPuzzleDetail(${puzzle.id})">
                 ${thumbnail}
                 <div class="puzzle-item-info">
-                    <h3>${puzzle.name}</h3>
-                    <p>${puzzle.pieces} pieces${puzzle.brand ? ' • ' + puzzle.brand : ''}</p>
+                    <h3>${escapeHtml(puzzle.name)}</h3>
+                    <p>${escapeHtml(String(puzzle.pieces))} pieces${puzzle.brand ? ' • ' + escapeHtml(puzzle.brand) : ''}</p>
                 </div>
             </div>
         `;
@@ -1029,18 +1041,18 @@ function renderOverview(puzzle) {
     
     document.getElementById('puzzleOverview').innerHTML = `
         <div style="font-size: 18px; line-height: 1.8;">
-            <p><strong>Brand:</strong> ${puzzle.brand || 'Not specified'}</p>
-            <p><strong>Pieces:</strong> ${puzzle.pieces}</p>
-            <p><strong>Theme:</strong> ${puzzle.theme || 'Not specified'}</p>
-            ${puzzle.series ? `<p><strong>Series/Set:</strong> ${puzzle.series}</p>` : ''}
-            <p><strong>Storage Location:</strong> ${puzzle.location || 'Not specified'}</p>
-            <p><strong>Source:</strong> ${puzzle.purchasedFrom || 'Not specified'}</p>
+            <p><strong>Brand:</strong> ${puzzle.brand ? escapeHtml(puzzle.brand) : 'Not specified'}</p>
+            <p><strong>Pieces:</strong> ${escapeHtml(String(puzzle.pieces))}</p>
+            <p><strong>Theme:</strong> ${puzzle.theme ? escapeHtml(puzzle.theme) : 'Not specified'}</p>
+            ${puzzle.series ? `<p><strong>Series/Set:</strong> ${escapeHtml(puzzle.series)}</p>` : ''}
+            <p><strong>Storage Location:</strong> ${puzzle.location ? escapeHtml(puzzle.location) : 'Not specified'}</p>
+            <p><strong>Source:</strong> ${puzzle.purchasedFrom ? escapeHtml(puzzle.purchasedFrom) : 'Not specified'}</p>
             <p><strong>Overall Rating:</strong> <span style="color: #ffc107; font-size: 24px;">${stars}</span></p>
             <p><strong>Times Completed:</strong> ${puzzle.logs.length}</p>
-            <p><strong>Condition:</strong> ${condition}</p>
+            <p><strong>Condition:</strong> ${escapeHtml(condition)}</p>
             <p><strong>Passes Pickup Test:</strong> ${passesPickup}</p>
             <p><strong>Missing Pieces:</strong> ${missingPieces}</p>
-            <p><strong>Puzzle Dust Level:</strong> ${puzzle.puzzleDust || 'Not specified'}</p>
+            <p><strong>Puzzle Dust Level:</strong> ${puzzle.puzzleDust ? escapeHtml(puzzle.puzzleDust) : 'Not specified'}</p>
             <p><strong>Donation Status:</strong> ${donated}</p>
             <p><strong>Puzzle Quality Score:</strong> ${qualityDisplay}</p>
         </div>
@@ -1058,16 +1070,22 @@ async function handleImageUpload(event) {
     }
 
     try {
-        await fetch(`/api/puzzles/${currentPuzzleId}/images`, {
+        const response = await fetch(`/api/puzzles/${currentPuzzleId}/images`, {
             method: 'POST',
             body: formData
-        }).then(res => res.json());
+        });
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            showAlert('Failed to upload images: ' + (err.error || response.statusText), 'error');
+            return;
+        }
 
         showAlert(`${files.length} image(s) uploaded successfully!`);
         const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
         renderImages(puzzle);
     } catch (error) {
         console.error('Failed to upload images:', error);
+        showAlert('Failed to upload images', 'error');
     }
 
     event.target.value = '';
@@ -1085,19 +1103,21 @@ function renderImages(puzzle) {
     gallery.innerHTML = puzzle.images.map((img, index) => {
         const isThumbnail = index === (puzzle.thumbnailIndex || 0);
         const thumbnailBadge = isThumbnail ? '<div style="position: absolute; top: 5px; left: 5px; background: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;">THUMBNAIL</div>' : '';
-        
+
         return `
-            <div class="image-item" onclick="openLightbox('${img}')">
+            <div class="image-item" data-img-index="${index}" onclick="openLightboxByIndex(${index})">
                 ${thumbnailBadge}
-                <img src="${img}" alt="Puzzle image ${index + 1}">
+                <img src="${escapeHtml(img)}" alt="Puzzle image ${index + 1}">
                 <div class="image-actions">
                     ${!isThumbnail ? `<button class="image-btn" onclick="event.stopPropagation(); setThumbnail(${index})" title="Set as thumbnail">⭐</button>` : ''}
-                    <button class="image-btn" onclick="event.stopPropagation(); openImageEditor('${img}', ${index})" title="Edit">✎</button>
+                    <button class="image-btn" onclick="event.stopPropagation(); openImageEditorByIndex(${index})" title="Edit">✎</button>
                     <button class="image-btn delete-image" onclick="event.stopPropagation(); deleteImage(${index})" title="Delete">&times;</button>
                 </div>
             </div>
         `;
     }).join('');
+    // Store image URLs for safe access from onclick handlers
+    gallery._imageUrls = puzzle.images.slice();
 }
 
 // Delete image
@@ -1126,6 +1146,8 @@ function showAddLogModal() {
     document.getElementById('logMinutes').value = '0';
     document.getElementById('logSeconds').value = '0';
     document.getElementById('logNotes').value = '';
+    currentLogRating = 0;
+    updateLogRatingDisplay();
     showModal('logModal');
 }
 
@@ -1166,7 +1188,7 @@ async function saveLog(event) {
     const logData = {
         date: document.getElementById('logDate').value,
         time: totalHours,
-        rating: 0,
+        rating: currentLogRating,
         notes: document.getElementById('logNotes').value
     };
 
@@ -1217,7 +1239,7 @@ function renderLogs(puzzle) {
                     <div class="log-item-date">${new Date(log.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
                     <div class="log-item-time">${timeFormatted}</div>
                 </div>
-                ${log.notes ? `<p style="color: #666; margin-top: 10px;">${log.notes}</p>` : ''}
+                ${log.notes ? `<p style="color: #666; margin-top: 10px;">${escapeHtml(log.notes)}</p>` : ''}
                 <div style="margin-top: 10px; display: flex; gap: 10px;">
                     <button class="btn btn-secondary" style="padding: 8px 16px; font-size: 14px;" onclick="editLog(${log.id})">Edit</button>
                     <button class="btn btn-danger" style="padding: 8px 16px; font-size: 14px;" onclick="deleteLog(${log.id})">Delete</button>
@@ -1365,7 +1387,7 @@ function renderCustomFields(puzzle) {
     container.innerHTML = puzzle.customFields.map(field => `
         <div class="custom-field-item">
             <div>
-                <strong>${field.name}:</strong> ${field.value}
+                <strong>${escapeHtml(field.name)}:</strong> ${escapeHtml(field.value)}
             </div>
             <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="deleteCustomField(${field.id})">Delete</button>
         </div>
@@ -1489,15 +1511,15 @@ function searchPuzzles() {
 
     listContainer.innerHTML = filtered.map(puzzle => {
         const thumbnail = puzzle.images && puzzle.images.length > 0
-            ? `<img src="${puzzle.images[0]}" alt="${puzzle.name}" class="puzzle-item-thumbnail">`
+            ? `<img src="${escapeHtml(puzzle.images[0])}" alt="${escapeHtml(puzzle.name)}" class="puzzle-item-thumbnail">`
             : `<div class="puzzle-item-thumbnail">🧩</div>`;
-        
+
         return `
             <div class="puzzle-item ${puzzle.id === currentPuzzleId ? 'active' : ''}" onclick="showPuzzleDetail(${puzzle.id})">
                 ${thumbnail}
                 <div class="puzzle-item-info">
-                    <h3>${puzzle.name}</h3>
-                    <p>${puzzle.pieces} pieces${puzzle.brand ? ' • ' + puzzle.brand : ''}</p>
+                    <h3>${escapeHtml(puzzle.name)}</h3>
+                    <p>${escapeHtml(String(puzzle.pieces))} pieces${puzzle.brand ? ' • ' + escapeHtml(puzzle.brand) : ''}</p>
                 </div>
             </div>
         `;
@@ -1597,6 +1619,18 @@ async function updatePassesPickup() {
 function openLightbox(imageSrc) {
     document.getElementById('lightboxImage').src = imageSrc;
     document.getElementById('imageLightbox').classList.add('active');
+}
+
+function openLightboxByIndex(index) {
+    const gallery = document.getElementById('imageGallery');
+    const src = gallery._imageUrls && gallery._imageUrls[index];
+    if (src) openLightbox(src);
+}
+
+function openImageEditorByIndex(index) {
+    const gallery = document.getElementById('imageGallery');
+    const src = gallery._imageUrls && gallery._imageUrls[index];
+    if (src) openImageEditor(src, index);
 }
 
 function closeLightbox() {
@@ -1952,7 +1986,9 @@ function editLog(logId) {
     document.getElementById('logMinutes').value = minutes;
     document.getElementById('logSeconds').value = seconds;
     document.getElementById('logNotes').value = log.notes || '';
-    
+    currentLogRating = log.rating || 0;
+    updateLogRatingDisplay();
+
     showModal('logModal');
 }
 
