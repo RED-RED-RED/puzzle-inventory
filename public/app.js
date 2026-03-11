@@ -454,9 +454,7 @@ function toggleDarkMode() {
 }
 
 function updateDarkModeButtons(isDark) {
-    const navBtn = document.getElementById('darkModeToggle');
     const settingsBtn = document.getElementById('darkModeSettingsBtn');
-    if (navBtn) navBtn.textContent = isDark ? '☀️' : '🌙';
     if (settingsBtn) settingsBtn.textContent = isDark ? '☀️ Disable Dark Mode' : '🌙 Enable Dark Mode';
 }
 
