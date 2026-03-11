@@ -440,6 +440,24 @@ async function loadTheme() {
         console.error('Failed to load theme:', error);
         applyThemeStyles('#667eea', '#764ba2');
     }
+    // Restore dark mode from localStorage
+    if (localStorage.getItem('darkMode') === '1') {
+        document.body.classList.add('dark-mode');
+        updateDarkModeButtons(true);
+    }
+}
+
+function toggleDarkMode() {
+    const isDark = document.body.classList.toggle('dark-mode');
+    localStorage.setItem('darkMode', isDark ? '1' : '0');
+    updateDarkModeButtons(isDark);
+}
+
+function updateDarkModeButtons(isDark) {
+    const navBtn = document.getElementById('darkModeToggle');
+    const settingsBtn = document.getElementById('darkModeSettingsBtn');
+    if (navBtn) navBtn.textContent = isDark ? '☀️' : '🌙';
+    if (settingsBtn) settingsBtn.textContent = isDark ? '☀️ Disable Dark Mode' : '🌙 Enable Dark Mode';
 }
 
 function applyThemeStyles(primaryColor, secondaryColor) {
