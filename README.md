@@ -2,7 +2,7 @@
 
 A web-based inventory system for tracking jigsaw puzzles. Runs on Node.js with a small Express server and stores everything as JSON files, so there is no database to manage.
 
-**Version:** SEHv1.05
+**Version:** SEHv1.06
 
 ---
 
@@ -132,7 +132,7 @@ These archives live on the same disk as the app. For real protection, copy them 
 - **Wishlist to collection**: "Got It" moves a wishlist item into the collection with its details filled in
 - **CSV export** of puzzles and wishlist for Excel, Numbers or Google Sheets
 - **Statistics** for each puzzle and across the collection
-- **Themeable** colors and dark mode
+- **Appearance**: warm or cool gray, a choice of accent colors, and a charcoal dark mode
 - **Phone friendly**: compact layout on phones, and it can be added to the home screen like an app
 - **Managed dropdowns** for brands, themes and series/sets, editable in Settings
 
@@ -152,7 +152,9 @@ puzzle-inventory/
 │   └── backup.sh                         # Archives data/ and uploads/
 ├── public/
 │   ├── index.html             # Frontend UI
+│   ├── styles.css             # All styling (gray tones, dark mode, phone layout)
 │   ├── app.js                 # Frontend logic
+│   ├── fonts/                 # Young Serif and Nunito Sans (SIL Open Font License)
 │   ├── manifest.webmanifest   # Home-screen app settings
 │   ├── sw.js                  # Service worker (offline page only)
 │   ├── offline.html           # Shown when the server can't be reached
@@ -247,12 +249,28 @@ All endpoints return JSON. Errors come back as `{ "error": "message" }` with an 
 | DELETE | `/api/settings/:list` | `{ value }` removes from that list |
 | GET | `/api/health` | `200` when up and data is readable, `503` otherwise |
 | GET | `/api/theme` | UI colors |
-| PUT | `/api/theme` | `{ primary: "#rrggbb", secondary: "#rrggbb" }` |
+| PUT | `/api/theme` | `{ primary: "#rrggbb", tone: "warm" or "cool" }` (`primary` is the accent color) |
 | POST | `/api/restore` | Replace all data from an in-app backup file (current data is copied to `data/pre-restore-*` first; a backup with no wishlist keeps the current one) |
 
 ---
 
 ## Changelog
+
+### SEHv1.06 - 2026-11-21
+**New look:**
+- Calm gray design: warm or cool gray, with the puzzle photos as the main color. No more purple gradients.
+- Puzzle page leads with a large photo next to the piece count, rating and completion history, with the details beside it
+- Home shows the collection as a photo grid, with the stats in one compact row
+- Settings > Appearance: choose warm or cool gray and an accent color (slate, charcoal, sage, teal, dusty rose, plum or custom). It syncs to every device; dark mode stays per device.
+- New typefaces, hosted in the app so no internet is needed: Young Serif for puzzle names, Nunito Sans for everything else
+- Clearer, shorter labels throughout (tabs are now Overview, Photos, Completions, Details, Stats)
+- Gray app icon, and phone browser bars match the app
+- Text contrast meets accessibility guidelines in every tone, light and dark
+
+**Fixes:**
+- Puzzle dust or condition values that aren't in the dropdown list now show instead of appearing blank
+- On phones, the puzzle title is no longer hidden under the top bar after tapping a puzzle
+- Anyone on one of the old color themes is moved to the new default automatically
 
 ### SEHv1.05 - 2026-11-21
 **Phone and install:**

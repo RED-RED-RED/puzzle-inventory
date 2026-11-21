@@ -57,7 +57,9 @@ function revealContent() {
     if (!isPhoneLayout()) return;
     setBrowsePanel(false);
     const content = document.querySelector(".content-area");
-    if (content) window.scrollTo({ top: Math.max(0, content.getBoundingClientRect().top + window.scrollY - 8), behavior: "smooth" });
+    const bar = document.querySelector(".app-bar");
+    const offset = (bar ? bar.offsetHeight : 0) + 4;
+    if (content) window.scrollTo({ top: Math.max(0, content.getBoundingClientRect().top + window.scrollY - offset), behavior: "smooth" });
 }
 
 function toggleMissingCount(checkboxId, wrapId) {
@@ -76,6 +78,21 @@ function setSelectValue(selectId, value) {
         select.appendChild(option);
     }
     select.value = value;
+}
+
+// Small shared pieces of markup
+const pieceIcon = () => '<svg viewBox="0 0 512 512" aria-hidden="true"><use href="#piece"/></svg>';
+
+function starsHtml(rating) {
+    const n = Math.max(0, Math.min(5, rating || 0));
+    return `<span class="stars" role="img" aria-label="${n} of 5 stars">${"★".repeat(n)}<span class="off">${"★".repeat(5 - n)}</span></span>`;
+}
+
+const formatPieces = n => Number(n || 0).toLocaleString();
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function longDate(value) {
+    return parseLocalDate(value).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 }
 
 let editingPuzzleId = null;
@@ -159,7 +176,7 @@ function showWishlist() {
 
 function showAddWishlistModal() {
     editingWishlistId = null;
-    document.getElementById('wishlistModalTitle').textContent = 'Add to Wishlist';
+    document.getElementById('wishlistModalTitle').textContent = 'Add to wishlist';
     document.getElementById('wishlistName').value = '';
     document.getElementById('wishlistBrand').value = '';
     document.getElementById('wishlistPieces').value = '';
@@ -177,7 +194,7 @@ function editWishlistItem(id) {
     if (!item) return;
     
     editingWishlistId = id;
-    document.getElementById('wishlistModalTitle').textContent = 'Edit Wishlist Item';
+    document.getElementById('wishlistModalTitle').textContent = 'Edit wishlist item';
     document.getElementById('wishlistName').value = item.name;
     document.getElementById('wishlistBrand').value = item.brand || '';
     document.getElementById('wishlistPieces').value = item.pieces || '';
@@ -208,47 +225,42 @@ async function deleteWishlistItem(id) {
 
 function renderWishlist() {
     const container = document.getElementById('wishlistGrid');
-    
+
     if (wishlistItems.length === 0) {
         container.innerHTML = `
-            <div style="grid-column: 1/-1; text-align: center; padding: 60px; color: #666;">
-                <h3 style="font-size: 1.5em; margin-bottom: 10px;">No items in wishlist</h3>
-                <p>Add puzzles you want to your wishlist!</p>
+            <div class="empty-state" style="grid-column: 1 / -1;">
+                <h3>Nothing on the wishlist yet</h3>
+                <p>Add puzzles you'd like to find, so you have them handy at the store.</p>
             </div>
         `;
         return;
     }
-    
-    // Sort by priority
-    const sorted = [...wishlistItems].sort((a, b) => {
-        const priorityOrder = { high: 0, medium: 1, low: 2 };
-        return (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1);
-    });
-    
+
+    const priorityOrder = { high: 0, medium: 1, low: 2 };
+    const sorted = [...wishlistItems].sort((a, b) => (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1));
+
     container.innerHTML = sorted.map(item => {
         const priority = ['high', 'medium', 'low'].includes(item.priority) ? item.priority : 'medium';
-        const priorityClass = `priority-${priority}`;
-        const priorityText = priority.charAt(0).toUpperCase() + priority.slice(1);
-        const priceFormatted = formatPrice(item.price);
+        const priorityText = priority.charAt(0).toUpperCase() + priority.slice(1) + ' priority';
+        const price = formatPrice(item.price);
         const safeUrl = item.url && /^https?:\/\//i.test(item.url) ? item.url : null;
-        const urlLink = safeUrl ? `<p><strong>Link:</strong> <a href="${escapeHtml(safeUrl)}" target="_blank" style="color: var(--primary-color); text-decoration: underline;">View Product</a></p>` : '';
+        const meta = [item.brand, item.pieces ? `${formatPieces(item.pieces)} pieces` : '', item.theme].filter(Boolean).map(escapeHtml).join(', ');
+        const where = item.whereToBuy ? `<p class="meta">From ${escapeHtml(item.whereToBuy)}</p>` : '';
 
         return `
             <div class="wishlist-card">
+                <div><span class="tag priority-${priority}">${priorityText}</span></div>
                 <h3>${escapeHtml(item.name)}</h3>
-                ${item.brand ? `<p><strong>Brand:</strong> ${escapeHtml(item.brand)}</p>` : ''}
-                ${item.pieces ? `<p><strong>Pieces:</strong> ${escapeHtml(String(item.pieces))}</p>` : ''}
-                ${item.theme ? `<p><strong>Theme:</strong> ${escapeHtml(item.theme)}</p>` : ''}
-                ${item.whereToBuy ? `<p><strong>Where to Buy:</strong> ${escapeHtml(item.whereToBuy)}</p>` : ''}
-                ${urlLink}
-                ${priceFormatted ? `<p><strong>Price:</strong> ${escapeHtml(priceFormatted)}</p>` : ''}
-                ${item.notes ? `<p style="margin-top: 10px;"><em>${escapeHtml(item.notes)}</em></p>` : ''}
-                <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn btn-success" style="padding: 8px 16px; font-size: 14px;" onclick="convertWishlistItem(${item.id})" title="Move this puzzle into your collection">✓ Got It</button>
-                    <button class="btn btn-secondary" style="padding: 8px 16px; font-size: 14px;" onclick="editWishlistItem(${item.id})">Edit</button>
-                    <button class="btn btn-danger" style="padding: 8px 16px; font-size: 14px;" onclick="deleteWishlistItem(${item.id})">Remove</button>
+                ${meta ? `<p class="meta">${meta}</p>` : ''}
+                ${where}
+                ${price ? `<p class="price">${escapeHtml(price)}</p>` : ''}
+                ${safeUrl ? `<p><a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener">View product</a></p>` : ''}
+                ${item.notes ? `<p class="notes">${escapeHtml(item.notes)}</p>` : ''}
+                <div class="btn-row">
+                    <button class="btn btn-primary btn-small" onclick="convertWishlistItem(${item.id})" title="Move this puzzle into your collection">Got it</button>
+                    <button class="btn btn-secondary btn-small" onclick="editWishlistItem(${item.id})">Edit</button>
+                    <button class="btn btn-danger btn-small" onclick="deleteWishlistItem(${item.id})">Remove</button>
                 </div>
-                <span class="priority ${priorityClass}">${escapeHtml(priorityText)} Priority</span>
             </div>
         `;
     }).join('');
@@ -325,19 +337,19 @@ function renderManagedList(containerId, kind, emptyText) {
     if (!container) return;
     const items = settings[kind] || [];
     if (items.length === 0) {
-        container.innerHTML = `<p style="color: #666;">${emptyText}</p>`;
+        container.innerHTML = `<p class="muted">${emptyText}</p>`;
         return;
     }
     container.innerHTML = items.map((item, index) => `
         <div class="custom-field-item">
-            <div><strong>${escapeHtml(item)}</strong></div>
-            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="deleteManagedItem('${kind}', ${index})">Delete</button>
+            <div>${escapeHtml(item)}</div>
+            <button class="btn btn-danger btn-small" onclick="deleteManagedItem('${kind}', ${index})">Remove</button>
         </div>
     `).join("");
 }
 
-function renderBrandsList() { renderManagedList("brandsList", "brands", "No brands defined yet."); }
-function renderThemesList() { renderManagedList("themesList", "themes", "No themes defined yet."); }
+function renderBrandsList() { renderManagedList("brandsList", "brands", "No brands yet. They also get added when you type a new one on a puzzle."); }
+function renderThemesList() { renderManagedList("themesList", "themes", "No themes yet."); }
 
 function fillManagedDropdown(selectId, kind, addLabel) {
     const select = document.getElementById(selectId);
@@ -345,7 +357,7 @@ function fillManagedDropdown(selectId, kind, addLabel) {
     const currentValue = select.value;
     const items = settings[kind] || [];
     select.innerHTML = `
-        <option value="">Select or type new...</option>
+        <option value="">Not specified</option>
         ${items.map(item => `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`).join("")}
         <option value="__new__">${addLabel}</option>
     `;
@@ -354,8 +366,8 @@ function fillManagedDropdown(selectId, kind, addLabel) {
     }
 }
 
-function updateBrandDropdowns() { fillManagedDropdown("puzzleBrand", "brands", "+ Add New Brand"); }
-function updateThemeDropdowns() { fillManagedDropdown("puzzleTheme", "themes", "+ Add New Theme"); }
+function updateBrandDropdowns() { fillManagedDropdown("puzzleBrand", "brands", "Add a new brand…"); }
+function updateThemeDropdowns() { fillManagedDropdown("puzzleTheme", "themes", "Add a new theme…"); }
 
 function handleBrandChange() {
     const select = document.getElementById('puzzleBrand');
@@ -456,97 +468,90 @@ async function handleRestoreFile(event) {
     }
 }
 
-// Theme management
+// ---------------------------------------------------------------------------
+// Appearance: gray tone + accent color (saved on the server so every device
+// matches) and dark mode (per device).
+// ---------------------------------------------------------------------------
+
+const DEFAULT_ACCENT = '#4e5d6c';
+// Colors from the old purple/gradient themes; anyone still on one gets the new default
+const LEGACY_THEME_COLORS = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#30cfd0', '#a8edea', '#ff9a56'];
+
+let appearance = { accent: DEFAULT_ACCENT, tone: 'warm' };
+
 async function loadTheme() {
     try {
         const theme = await apiRequest('/api/theme');
-        applyThemeStyles(theme.primary, theme.secondary);
+        const accent = /^#[0-9a-f]{6}$/i.test(theme.primary || '') ? theme.primary.toLowerCase() : DEFAULT_ACCENT;
+        appearance = {
+            accent: LEGACY_THEME_COLORS.includes(accent) ? DEFAULT_ACCENT : accent,
+            tone: theme.tone === 'cool' ? 'cool' : 'warm'
+        };
     } catch (error) {
         console.error('Failed to load theme:', error);
-        applyThemeStyles('#667eea', '#764ba2');
     }
-    // Restore dark mode from localStorage
-    if (localStorage.getItem('darkMode') === '1') {
-        document.body.classList.add('dark-mode');
-        updateDarkModeButtons(true);
+    applyAppearance();
+    updateDarkModeButtons(document.documentElement.classList.contains('dark-mode'));
+}
+
+function applyAppearance() {
+    const root = document.documentElement;
+    root.style.setProperty('--accent', appearance.accent);
+    if (appearance.tone === 'cool') root.dataset.tone = 'cool';
+    else delete root.dataset.tone;
+    try { localStorage.setItem('tone', appearance.tone); } catch (e) { /* ignore */ }
+
+    document.querySelectorAll('#toneOptions .tone-option').forEach(btn => {
+        btn.setAttribute('aria-pressed', String(btn.dataset.tone === appearance.tone));
+    });
+    document.querySelectorAll('#accentSwatches .swatch').forEach(btn => {
+        btn.setAttribute('aria-pressed', String(btn.dataset.accent === appearance.accent));
+    });
+    const picker = document.getElementById('primaryColorPicker');
+    if (picker) picker.value = appearance.accent;
+    updateThemeColorMeta();
+}
+
+// Phone browser bars match the app bar
+function updateThemeColorMeta() {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim() || '#f5f4f2';
+}
+
+async function saveAppearance() {
+    try {
+        await apiRequest('/api/theme', {
+            method: 'PUT',
+            body: JSON.stringify({ primary: appearance.accent, secondary: appearance.accent, tone: appearance.tone })
+        });
+    } catch (error) {
+        console.error('Failed to save appearance:', error);
     }
 }
 
+function setTone(tone) {
+    appearance.tone = tone === 'cool' ? 'cool' : 'warm';
+    applyAppearance();
+    saveAppearance();
+}
+
+function setAccent(color) {
+    if (!/^#[0-9a-f]{6}$/i.test(color)) return;
+    appearance.accent = color.toLowerCase();
+    applyAppearance();
+    saveAppearance();
+}
+
 function toggleDarkMode() {
-    const isDark = document.body.classList.toggle('dark-mode');
-    localStorage.setItem('darkMode', isDark ? '1' : '0');
+    const isDark = document.documentElement.classList.toggle('dark-mode');
+    try { localStorage.setItem('darkMode', isDark ? '1' : '0'); } catch (e) { /* ignore */ }
     updateDarkModeButtons(isDark);
+    updateThemeColorMeta();
 }
 
 function updateDarkModeButtons(isDark) {
     const settingsBtn = document.getElementById('darkModeSettingsBtn');
-    if (settingsBtn) settingsBtn.textContent = isDark ? '☀️ Disable Dark Mode' : '🌙 Enable Dark Mode';
-}
-
-function applyThemeStyles(primaryColor, secondaryColor) {
-    // Convert hex to RGB
-    const hexToRgb = (hex) => {
-        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-        return result ? {
-            r: parseInt(result[1], 16),
-            g: parseInt(result[2], 16),
-            b: parseInt(result[3], 16)
-        } : null;
-    };
-
-    const primaryRgb = hexToRgb(primaryColor);
-    const secondaryRgb = hexToRgb(secondaryColor);
-
-    document.documentElement.style.setProperty('--primary-color', primaryColor);
-    document.documentElement.style.setProperty('--secondary-color', secondaryColor);
-    document.documentElement.style.setProperty('--primary-rgb', `${primaryRgb.r}, ${primaryRgb.g}, ${primaryRgb.b}`);
-    document.documentElement.style.setProperty('--secondary-rgb', `${secondaryRgb.r}, ${secondaryRgb.g}, ${secondaryRgb.b}`);
-
-    // Update color pickers if they exist
-    const primaryPicker = document.getElementById('primaryColorPicker');
-    const primaryText = document.getElementById('primaryColorText');
-    const secondaryPicker = document.getElementById('secondaryColorPicker');
-    const secondaryText = document.getElementById('secondaryColorText');
-    
-    if (primaryPicker) primaryPicker.value = primaryColor;
-    if (primaryText) primaryText.value = primaryColor;
-    if (secondaryPicker) secondaryPicker.value = secondaryColor;
-    if (secondaryText) secondaryText.value = secondaryColor;
-}
-
-async function applyTheme(primaryColor, secondaryColor) {
-    applyThemeStyles(primaryColor, secondaryColor);
-    
-    // Save to server
-    try {
-        await apiRequest('/api/theme', {
-            method: 'PUT',
-            body: JSON.stringify({ primary: primaryColor, secondary: secondaryColor })
-        });
-    } catch (error) {
-        console.error('Failed to save theme:', error);
-    }
-}
-
-function updateThemeColor(type, color) {
-    if (!color.startsWith('#')) {
-        color = '#' + color.replace(/[^0-9a-f]/gi, '');
-    }
-    
-    const primaryColor = type === 'primary' ? color : document.getElementById('primaryColorPicker').value;
-    const secondaryColor = type === 'secondary' ? color : document.getElementById('secondaryColorPicker').value;
-    
-    applyTheme(primaryColor, secondaryColor);
-}
-
-function applyPresetTheme(primary, secondary) {
-    applyTheme(primary, secondary);
-    showAlert('Theme applied successfully!');
-}
-
-function resetTheme() {
-    applyTheme('#667eea', '#764ba2');
-    showAlert('Theme reset to default!');
+    if (settingsBtn) settingsBtn.textContent = isDark ? 'Turn off dark mode' : 'Turn on dark mode';
 }
 
 // Navigation functions
@@ -590,84 +595,50 @@ function showSettings() {
 
 // Render dashboard
 function renderDashboard() {
-    
-    const totalPuzzles = puzzles.length;
-    const totalPieces = puzzles.reduce((sum, p) => sum + (p.pieces || 0), 0);
     const allLogs = puzzles.flatMap(p => p.logs || []);
-    const totalCompletions = allLogs.length;
     const totalHours = allLogs.reduce((sum, log) => sum + (log.time || 0), 0);
     const ratedPuzzles = puzzles.filter(p => p.rating > 0);
     const avgRating = ratedPuzzles.length
         ? (ratedPuzzles.reduce((sum, p) => sum + p.rating, 0) / ratedPuzzles.length).toFixed(1)
-        : 0;
-    const donatedCount = puzzles.filter(p => p.donated).length;
+        : '–';
 
+    const stats = [
+        [puzzles.length, puzzles.length === 1 ? 'puzzle' : 'puzzles'],
+        [formatPieces(puzzles.reduce((sum, p) => sum + (p.pieces || 0), 0)), 'pieces'],
+        [allLogs.length, allLogs.length === 1 ? 'completion' : 'completions'],
+        [totalHours > 0 ? formatTime(totalHours).split(' ').slice(0, 2).join(' ') : '–', 'spent puzzling'],
+        [avgRating, 'average rating'],
+        [puzzles.filter(p => p.donated).length, 'donated']
+    ];
     const statsContainer = document.getElementById('dashboardStats');
     if (statsContainer) {
-        statsContainer.innerHTML = `
-            <div class="dashboard-stat-card">
-                <h3>${totalPuzzles}</h3>
-                <p>Total Puzzles</p>
-            </div>
-            <div class="dashboard-stat-card">
-                <h3>${totalPieces.toLocaleString()}</h3>
-                <p>Total Pieces</p>
-            </div>
-            <div class="dashboard-stat-card">
-                <h3>${totalCompletions}</h3>
-                <p>Completions</p>
-            </div>
-            <div class="dashboard-stat-card">
-                <h3>${formatTime(totalHours)}</h3>
-                <p>Time Spent</p>
-            </div>
-            <div class="dashboard-stat-card">
-                <h3>${avgRating || 'N/A'}</h3>
-                <p>Avg Rating</p>
-            </div>
-            <div class="dashboard-stat-card">
-                <h3>${donatedCount}</h3>
-                <p>Donated Puzzles</p>
+        statsContainer.innerHTML = stats.map(([value, label]) => `
+            <div class="stat"><span class="value">${value}</span><span class="label">${label}</span></div>
+        `).join('');
+    }
+
+    const gridContainer = document.getElementById('recentPuzzleGrid');
+    if (!gridContainer) return;
+    const recent = [...puzzles].sort((a, b) => b.id - a.id).slice(0, 8);
+    if (recent.length === 0) {
+        gridContainer.innerHTML = `
+            <div class="empty-state" style="grid-column: 1 / -1;">
+                <h3>No puzzles yet</h3>
+                <p>Add your first one and it will show up here.</p>
+                <button class="btn btn-primary" style="margin-top: 12px;" onclick="showAddPuzzleModal()">Add puzzle</button>
             </div>
         `;
+        return;
     }
-
-    // Show recent puzzles (last 6)
-    const recentPuzzles = [...puzzles].reverse().slice(0, 6);
-    
-    const gridContainer = document.getElementById('recentPuzzleGrid');
-    if (gridContainer) {
-        if (recentPuzzles.length === 0) {
-            gridContainer.innerHTML = `
-                <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #666;">
-                    <p>No puzzles yet. Add your first puzzle to get started!</p>
-                </div>
-            `;
-        } else {
-            gridContainer.innerHTML = recentPuzzles.map(puzzle => {
-                const thumbnailIndex = Math.min(puzzle.thumbnailIndex || 0, (puzzle.images && puzzle.images.length > 0 ? puzzle.images.length - 1 : 0));
-                const thumbnail = puzzle.images && puzzle.images.length > 0
-                    ? `<img src="${escapeHtml(puzzle.images[thumbnailIndex])}" alt="${escapeHtml(puzzle.name)}" class="recent-puzzle-image">`
-                    : `<div class="recent-puzzle-image">🧩</div>`;
-
-                const stars = '★'.repeat(puzzle.rating || 0) + '☆'.repeat(5 - (puzzle.rating || 0));
-                const donatedBadge = puzzle.donated ? '<span style="background: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; margin-top: 5px; display: inline-block;">✓ Donated</span>' : '';
-
-                return `
-                    <div class="recent-puzzle-card" onclick="showPuzzleDetail(${puzzle.id})">
-                        ${thumbnail}
-                        <div class="recent-puzzle-info">
-                            <h4>${escapeHtml(puzzle.name)}</h4>
-                            <p><strong>${escapeHtml(String(puzzle.pieces))} pieces</strong></p>
-                            ${puzzle.brand ? `<p>${escapeHtml(puzzle.brand)}</p>` : ''}
-                            <p style="color: #ffc107; font-size: 1.1em; margin-top: 5px;">${stars}</p>
-                            ${donatedBadge}
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        }
-    }
+    gridContainer.innerHTML = recent.map(puzzle => `
+        <button type="button" class="puzzle-card" onclick="showPuzzleDetail(${puzzle.id})">
+            ${puzzleThumbnail(puzzle, 'photo')}
+            <h4>${escapeHtml(puzzle.name)}</h4>
+            <p class="meta">${formatPieces(puzzle.pieces)} pieces${puzzle.brand ? ', ' + escapeHtml(puzzle.brand) : ''}</p>
+            ${puzzle.rating > 0 ? starsHtml(puzzle.rating) : ''}
+            ${puzzle.donated ? '<div><span class="tag">Donated</span></div>' : ''}
+        </button>
+    `).join('');
 }
 
 
@@ -738,7 +709,7 @@ function closeModal(modalId) {
 function showAddPuzzleModal() {
     editingPuzzleId = null;
     convertingWishlistId = null;
-    document.getElementById('puzzleModalTitle').textContent = 'Add New Puzzle';
+    document.getElementById('puzzleModalTitle').textContent = 'Add puzzle';
     document.getElementById('puzzleName').value = '';
     
     updateBrandDropdowns();
@@ -799,7 +770,7 @@ function editPuzzle() {
 
     editingPuzzleId = currentPuzzleId;
     convertingWishlistId = null;
-    document.getElementById('puzzleModalTitle').textContent = 'Edit Puzzle';
+    document.getElementById('puzzleModalTitle').textContent = 'Edit puzzle';
     ['puzzleBrandCustom', 'puzzleThemeCustom', 'puzzleSeriesCustom'].forEach(id => {
         document.getElementById(id).value = '';
         document.getElementById(id).style.display = 'none';
@@ -846,10 +817,10 @@ function editPuzzle() {
     document.getElementById('puzzleModalMissingCount').value = puzzle.missingPieceCount || '';
     document.getElementById('puzzleModalMissingCountWrap').style.display = puzzle.missingPieces ? 'flex' : 'none';
     document.getElementById('puzzleModalNotes').value = puzzle.notes || '';
-    document.getElementById('puzzleModalCondition').value = puzzle.condition || '';
+    setSelectValue('puzzleModalCondition', puzzle.condition || '');
     document.getElementById('puzzleModalPassesPickup').checked = puzzle.passesPickup || false;
     document.getElementById('puzzleModalMissingPieces').checked = puzzle.missingPieces || false;
-    document.getElementById('puzzleModalDust').value = puzzle.puzzleDust || '';
+    setSelectValue('puzzleModalDust', puzzle.puzzleDust || '');
     document.getElementById('puzzleModalDonated').checked = puzzle.donated || false;
     currentRating = puzzle.rating || 0;
     updateModalRatingDisplay();
@@ -985,7 +956,7 @@ async function savePuzzle(event) {
         console.error("Failed to save puzzle:", error);
     } finally {
         btn.disabled = false;
-        btn.textContent = "Save Puzzle";
+        btn.textContent = "Save puzzle";
     }
 }
 
@@ -1083,9 +1054,9 @@ function getVisiblePuzzles() {
 
 function puzzleThumbnail(puzzle, className) {
     const images = puzzle.images || [];
-    if (!images.length) return `<div class="${className}">🧩</div>`;
+    if (!images.length) return `<div class="${className}">${pieceIcon()}</div>`;
     const index = Math.min(puzzle.thumbnailIndex || 0, images.length - 1);
-    return `<img src="${escapeHtml(images[index])}" alt="${escapeHtml(puzzle.name)}" class="${className}" loading="lazy">`;
+    return `<img src="${escapeHtml(images[index])}" alt="" class="${className}" loading="lazy">`;
 }
 
 function renderPuzzleList() {
@@ -1098,7 +1069,7 @@ function renderPuzzleList() {
         listContainer.innerHTML = `
             <div class="empty-state">
                 <h3>No puzzles yet</h3>
-                <p>Add your first puzzle to get started!</p>
+                <p>Use Add puzzle to start your collection.</p>
             </div>
         `;
         return;
@@ -1114,8 +1085,8 @@ function renderPuzzleList() {
     if (list.length === 0) {
         listContainer.innerHTML = `
             <div class="empty-state">
-                <h3>No matches found</h3>
-                <p>Try a different search or filter</p>
+                <h3>No matches</h3>
+                <p>Try a different search, or set the filters back to All.</p>
             </div>
         `;
         return;
@@ -1126,7 +1097,7 @@ function renderPuzzleList() {
             ${puzzleThumbnail(puzzle, "puzzle-item-thumbnail")}
             <div class="puzzle-item-info">
                 <h3>${escapeHtml(puzzle.name)}</h3>
-                <p>${escapeHtml(String(puzzle.pieces))} pieces${puzzle.brand ? " • " + escapeHtml(puzzle.brand) : ""}</p>
+                <p>${formatPieces(puzzle.pieces)} pieces${puzzle.brand ? ", " + escapeHtml(puzzle.brand) : ""}</p>
             </div>
         </div>
     `).join("");
@@ -1171,38 +1142,58 @@ async function showPuzzleDetail(puzzleId) {
     }
 }
 
-// Render overview
+// Render overview: the photo on the left, the key facts beside it, details below
 function renderOverview(puzzle) {
-    const stars = '★'.repeat(puzzle.rating || 0) + '☆'.repeat(5 - (puzzle.rating || 0));
-    const donated = puzzle.donated ? '<span style="color: #28a745; font-weight: 600;">✓ Donated</span>' : '<span style="color: #666;">Not donated</span>';
-    const condition = puzzle.condition ? puzzle.condition.charAt(0).toUpperCase() + puzzle.condition.slice(1) : 'Not specified';
-    const passesPickup = puzzle.passesPickup ? '<span style="color: #28a745; font-weight: 600;">✓ Yes</span>' : '<span style="color: #666;">Not tested</span>';
-    const missingCountText = puzzle.missingPieceCount > 0 ? ` (${puzzle.missingPieceCount} missing)` : '';
-    const missingPieces = puzzle.missingPieces ? `<span style="color: #dc3545; font-weight: 600;">⚠ Yes${missingCountText}</span>` : '<span style="color: #28a745;">✓ Complete</span>';
-    const qualityScore = puzzle.quality?.qualityScore || 'Not rated';
-    const qualityDisplay = typeof qualityScore === 'number' ? 
-        `<span style="font-size: 24px; font-weight: bold; color: var(--primary-color);">${qualityScore}/100</span>` : 
-        qualityScore;
-    
+    const images = puzzle.images || [];
+    const cover = images.length ? images[Math.min(puzzle.thumbnailIndex || 0, images.length - 1)] : null;
+    const photo = cover
+        ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(puzzle.name)}" class="overview-photo" onclick="openLightbox(this.src)">`
+        : `<div class="overview-photo">${pieceIcon()}<p>No photos yet</p><label for="imageInput" class="btn btn-secondary btn-small">Add photos</label></div>`;
+
+    const logs = puzzle.logs || [];
+    const last = lastCompleted(puzzle);
+    const doneLine = logs.length
+        ? `Done ${logs.length === 1 ? 'once' : logs.length + ' times'}, most recently ${longDate(last)}`
+        : 'Not done yet';
+
+    const tags = [];
+    if (puzzle.missingPieces) tags.push(`<span class="tag tag-danger">${puzzle.missingPieceCount > 0 ? plural(puzzle.missingPieceCount, 'piece') + ' missing' : 'Missing pieces'}</span>`);
+    if (puzzle.passesPickup) tags.push('<span class="tag tag-ok">Passes pickup test</span>');
+    if (puzzle.donated) tags.push('<span class="tag">Donated</span>');
+    if (puzzle.quality && puzzle.quality.qualityScore > 0) tags.push(`<span class="tag">Quality ${puzzle.quality.qualityScore} of 100</span>`);
+
+    const row = (label, value) => value ? `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>` : '';
+    const about = [
+        row('Brand', puzzle.brand),
+        row('Theme', puzzle.theme),
+        row('Series', puzzle.series),
+        row('Artist', puzzle.artist),
+        row('Finished size', puzzle.size),
+        row('Cut style', puzzle.cutStyle)
+    ].join('');
+    const condition = puzzle.condition ? puzzle.condition.charAt(0).toUpperCase() + puzzle.condition.slice(1) : '';
+    const keeping = [
+        row('Stored in', puzzle.location),
+        row('Got it from', puzzle.purchasedFrom),
+        row('Condition', condition),
+        row('Puzzle dust', puzzle.puzzleDust),
+        row('Added', puzzle.createdAt ? new Date(puzzle.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : '')
+    ].join('');
+    const custom = (puzzle.customFields || []).map(f => row(escapeHtml(f.name), f.value)).join('');
+
     document.getElementById('puzzleOverview').innerHTML = `
-        <div style="font-size: 18px; line-height: 1.8;">
-            <p><strong>Brand:</strong> ${puzzle.brand ? escapeHtml(puzzle.brand) : 'Not specified'}</p>
-            <p><strong>Pieces:</strong> ${escapeHtml(String(puzzle.pieces))}</p>
-            <p><strong>Theme:</strong> ${puzzle.theme ? escapeHtml(puzzle.theme) : 'Not specified'}</p>
-            ${puzzle.series ? `<p><strong>Series/Set:</strong> ${escapeHtml(puzzle.series)}</p>` : ''}
-            ${puzzle.artist ? `<p><strong>Artist:</strong> ${escapeHtml(puzzle.artist)}</p>` : ''}
-            ${puzzle.size ? `<p><strong>Finished Size:</strong> ${escapeHtml(puzzle.size)}</p>` : ''}
-            ${puzzle.cutStyle ? `<p><strong>Cut Style:</strong> ${escapeHtml(puzzle.cutStyle)}</p>` : ''}
-            <p><strong>Storage Location:</strong> ${puzzle.location ? escapeHtml(puzzle.location) : 'Not specified'}</p>
-            <p><strong>Source:</strong> ${puzzle.purchasedFrom ? escapeHtml(puzzle.purchasedFrom) : 'Not specified'}</p>
-            <p><strong>Overall Rating:</strong> <span style="color: #ffc107; font-size: 24px;">${stars}</span></p>
-            <p><strong>Times Completed:</strong> ${(puzzle.logs || []).length}</p>
-            <p><strong>Condition:</strong> ${escapeHtml(condition)}</p>
-            <p><strong>Passes Pickup Test:</strong> ${passesPickup}</p>
-            <p><strong>Missing Pieces:</strong> ${missingPieces}</p>
-            <p><strong>Puzzle Dust Level:</strong> ${puzzle.puzzleDust ? escapeHtml(puzzle.puzzleDust) : 'Not specified'}</p>
-            <p><strong>Donation Status:</strong> ${donated}</p>
-            <p><strong>Puzzle Quality Score:</strong> ${qualityDisplay}</p>
+        <div class="overview">
+            ${photo}
+            <div class="overview-key">
+                <div class="pieces">${formatPieces(puzzle.pieces)}</div>
+                <div class="pieces-label">pieces</div>
+                ${puzzle.rating > 0 ? starsHtml(puzzle.rating) : '<p class="muted" style="margin-top: 14px;">Not rated yet</p>'}
+                <p class="done-line">${doneLine}</p>
+                ${tags.length ? `<div class="status-tags">${tags.join('')}</div>` : ''}
+                ${about ? `<dl class="details-list">${about}</dl>` : ''}
+                ${keeping || custom ? `<dl class="details-list">${keeping}${custom}</dl>` : ''}
+                ${puzzle.notes ? `<p class="overview-notes">${escapeHtml(puzzle.notes)}</p>` : ''}
+            </div>
         </div>
     `;
 }
@@ -1231,22 +1222,22 @@ function renderImages(puzzle) {
     const gallery = document.getElementById('imageGallery');
     
     if (!puzzle.images || puzzle.images.length === 0) {
-        gallery.innerHTML = '<p style="color: #666; margin-top: 20px;">No images added yet.</p>';
+        gallery.innerHTML = '<p class="muted">No photos yet. The first one you add becomes the cover.</p>';
         return;
     }
 
     gallery.innerHTML = puzzle.images.map((img, index) => {
         const isThumbnail = index === (puzzle.thumbnailIndex || 0);
-        const thumbnailBadge = isThumbnail ? '<div style="position: absolute; top: 5px; left: 5px; background: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;">THUMBNAIL</div>' : '';
+        const thumbnailBadge = isThumbnail ? '<span class="badge-thumb">Cover</span>' : '';
 
         return `
             <div class="image-item" data-img-index="${index}" onclick="openLightboxByIndex(${index})">
                 ${thumbnailBadge}
                 <img src="${escapeHtml(img)}" alt="Puzzle image ${index + 1}">
                 <div class="image-actions">
-                    ${!isThumbnail ? `<button class="image-btn" onclick="event.stopPropagation(); setThumbnail(${index})" title="Set as thumbnail">⭐</button>` : ''}
-                    <button class="image-btn" onclick="event.stopPropagation(); openImageEditorByIndex(${index})" title="Edit">✎</button>
-                    <button class="image-btn delete-image" onclick="event.stopPropagation(); deleteImage(${index})" title="Delete">&times;</button>
+                    ${!isThumbnail ? `<button class="image-btn" onclick="event.stopPropagation(); setThumbnail(${index})" title="Use as cover" aria-label="Use as cover">★</button>` : ''}
+                    <button class="image-btn" onclick="event.stopPropagation(); openImageEditorByIndex(${index})" title="Rotate" aria-label="Rotate">↻</button>
+                    <button class="image-btn delete-image" onclick="event.stopPropagation(); deleteImage(${index})" title="Delete" aria-label="Delete photo">&times;</button>
                 </div>
             </div>
         `;
@@ -1277,7 +1268,7 @@ async function deleteImage(index) {
 // Show add log modal
 function showAddLogModal() {
     editingLogId = null;
-    document.getElementById('logModalTitle').textContent = 'Add Completion Log';
+    document.getElementById('logModalTitle').textContent = 'Log a completion';
     document.getElementById('logDate').value = todayLocal();
     document.getElementById('logHours').value = '0';
     document.getElementById('logMinutes').value = '0';
@@ -1363,7 +1354,7 @@ function renderLogs(puzzle) {
     const logList = document.getElementById('logList');
     
     if (!puzzle.logs || puzzle.logs.length === 0) {
-        logList.innerHTML = '<p style="color: #666; margin-top: 20px;">No completion logs yet.</p>';
+        logList.innerHTML = '<p class="muted">No completions yet. Log one each time you finish it.</p>';
         return;
     }
 
@@ -1372,7 +1363,7 @@ function renderLogs(puzzle) {
     logList.innerHTML = sortedLogs.map(log => {
         const timeFormatted = log.time > 0 ? formatTime(log.time) : "Not timed";
         const logStars = log.rating > 0
-            ? `<span class="log-stars" title="${log.rating} of 5">${"★".repeat(log.rating)}${"☆".repeat(5 - log.rating)}</span>`
+            ? `<span class="log-stars">${starsHtml(log.rating)}</span>`
             : "";
         
         return `
@@ -1382,10 +1373,10 @@ function renderLogs(puzzle) {
                     <div class="log-item-time">${timeFormatted}</div>
                 </div>
                 ${logStars}
-                ${log.notes ? `<p style="color: #666; margin-top: 10px;">${escapeHtml(log.notes)}</p>` : ''}
-                <div style="margin-top: 10px; display: flex; gap: 10px;">
-                    <button class="btn btn-secondary" style="padding: 8px 16px; font-size: 14px;" onclick="editLog(${log.id})">Edit</button>
-                    <button class="btn btn-danger" style="padding: 8px 16px; font-size: 14px;" onclick="deleteLog(${log.id})">Delete</button>
+                ${log.notes ? `<p class="log-notes">${escapeHtml(log.notes)}</p>` : ''}
+                <div class="log-actions">
+                    <button class="btn btn-secondary btn-small" onclick="editLog(${log.id})">Edit</button>
+                    <button class="btn btn-danger btn-small" onclick="deleteLog(${log.id})">Delete</button>
                 </div>
             </div>
         `;
@@ -1470,13 +1461,13 @@ async function updateDonationStatus() {
 
 // Render notes
 function renderNotes(puzzle) {
-    document.getElementById('puzzleCondition').value = puzzle.condition || '';
+    setSelectValue('puzzleCondition', puzzle.condition || '');
     document.getElementById('puzzlePassesPickup').checked = puzzle.passesPickup || false;
     document.getElementById('puzzleMissingPieces').checked = puzzle.missingPieces || false;
     document.getElementById('puzzleMissingCount').value = puzzle.missingPieceCount || '';
     document.getElementById('puzzleMissingCountWrap').style.display = puzzle.missingPieces ? 'flex' : 'none';
     document.getElementById('puzzleNotes').value = puzzle.notes || '';
-    document.getElementById('puzzleDust').value = puzzle.puzzleDust || '';
+    setSelectValue('puzzleDust', puzzle.puzzleDust || '');
     document.getElementById('puzzleDonated').checked = puzzle.donated || false;
     loadQualityData(puzzle);
     renderCustomFields(puzzle);
@@ -1518,16 +1509,16 @@ function renderCustomFields(puzzle) {
     const container = document.getElementById('customFields');
     
     if (!puzzle.customFields || puzzle.customFields.length === 0) {
-        container.innerHTML = '<p style="color: #666; margin-top: 15px;">No custom fields added yet.</p>';
+        container.innerHTML = '<p class="muted">None yet. Use these for anything the form doesn\'t cover.</p>';
         return;
     }
 
     container.innerHTML = puzzle.customFields.map(field => `
         <div class="custom-field-item">
             <div>
-                <strong>${escapeHtml(field.name)}:</strong> ${escapeHtml(field.value)}
+                <span class="name">${escapeHtml(field.name)}</span>${escapeHtml(field.value)}
             </div>
-            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="deleteCustomField(${field.id})">Delete</button>
+            <button class="btn btn-danger btn-small" onclick="deleteCustomField(${field.id})">Remove</button>
         </div>
     `).join('');
 }
@@ -1626,8 +1617,8 @@ Promise.all([
     // Show error in UI
     document.getElementById('puzzleList').innerHTML = `
         <div class="empty-state">
-            <h3 style="color: #dc3545;">Error Loading Data</h3>
-            <p>Check console for details</p>
+            <h3>Couldn't load your puzzles</h3>
+            <p>Check that the server is running, then reload the page.</p>
         </div>
     `;
 });
@@ -1948,7 +1939,7 @@ function editLog(logId) {
     editingLogId = logId;
     
     // Populate form with existing data
-    document.getElementById('logModalTitle').textContent = 'Edit Completion Log';
+    document.getElementById('logModalTitle').textContent = 'Edit completion';
     document.getElementById('logDate').value = log.date;
     
     const { hours, minutes, seconds } = hoursToTime(log.time);
@@ -1975,10 +1966,10 @@ function handleSeriesChange() {
     }
 }
 
-function updateSeriesDropdowns() { fillManagedDropdown("puzzleSeries", "series", "+ Add New Series/Set"); }
+function updateSeriesDropdowns() { fillManagedDropdown("puzzleSeries", "series", "Add a new series…"); }
 const addSeries = series => addManagedItem("series", series);
 const removeSeries = series => removeManagedItem("series", series);
-function renderSeriesList() { renderManagedList("seriesList", "series", "No series/sets added yet."); }
+function renderSeriesList() { renderManagedList("seriesList", "series", "No series yet."); }
 
 
 // ---------------------------------------------------------------------------
@@ -2002,7 +1993,7 @@ function convertWishlistItem(id) {
 
     showAddPuzzleModal();
     convertingWishlistId = id;
-    document.getElementById("puzzleModalTitle").textContent = "Add to Collection";
+    document.getElementById("puzzleModalTitle").textContent = "Add to collection";
     document.getElementById("puzzleName").value = item.name || "";
     document.getElementById("puzzlePieces").value = parseInt(item.pieces, 10) || "";
     setManagedSelect("puzzleBrand", "puzzleBrandCustom", item.brand || "");
@@ -2038,7 +2029,7 @@ function pickRandomPuzzle() {
 
     const result = document.getElementById("pickResult");
     if (candidates.length === 0) {
-        result.innerHTML = `<p style="text-align: center; color: #666;">No puzzles match those choices. Try loosening them.</p>`;
+        result.innerHTML = `<p class="pick-count">No puzzles match. Try a wider piece range or untick a box.</p>`;
         return;
     }
 
@@ -2050,17 +2041,17 @@ function pickRandomPuzzle() {
     const timesDone = (pick.logs || []).length;
     result.innerHTML = `
         <div class="pick-card">
-            ${puzzleThumbnail(pick, "pick-placeholder")}
-            <div style="flex: 1; min-width: 0;">
-                <h3 style="margin-bottom: 4px;">${escapeHtml(pick.name)}</h3>
-                <p style="color: #666;">${escapeHtml(String(pick.pieces))} pieces${pick.brand ? " • " + escapeHtml(pick.brand) : ""}</p>
-                <p style="color: #666; font-size: 14px;">${timesDone ? `Done ${timesDone} time${timesDone === 1 ? "" : "s"}` : "Not done yet"}${pick.location ? " • " + escapeHtml(pick.location) : ""}</p>
+            ${puzzleThumbnail(pick, "pick-photo")}
+            <div style="min-width: 0;">
+                <h3>${escapeHtml(pick.name)}</h3>
+                <p>${formatPieces(pick.pieces)} pieces${pick.brand ? ", " + escapeHtml(pick.brand) : ""}</p>
+                <p>${timesDone ? `Done ${timesDone === 1 ? "once" : timesDone + " times"}` : "Not done yet"}${pick.location ? `. In the ${escapeHtml(pick.location)}` : ""}</p>
             </div>
         </div>
-        <p style="text-align: center; color: #888; font-size: 13px; margin: 8px 0;">Picked from ${candidates.length} matching puzzle${candidates.length === 1 ? "" : "s"}</p>
-        <div style="display: flex; gap: 10px;">
-            <button class="btn btn-secondary" style="flex: 1;" onclick="pickRandomPuzzle()">🎲 Pick Again</button>
-            <button class="btn btn-primary" style="flex: 1;" onclick="closeModal('pickModal'); showPuzzleDetail(${pick.id})">Open Puzzle</button>
+        <p class="pick-count">Picked from ${plural(candidates.length, "matching puzzle")}</p>
+        <div class="form-row">
+            <button class="btn btn-secondary" onclick="pickRandomPuzzle()">Pick again</button>
+            <button class="btn btn-primary" onclick="closeModal('pickModal'); showPuzzleDetail(${pick.id})">Open puzzle</button>
         </div>
     `;
 }

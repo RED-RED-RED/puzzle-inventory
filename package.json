@@ -1,7 +1,7 @@
 {
   "name": "puzzle-inventory-app",
-  "version": "1.0.5",
-  "description": "Jigsaw puzzle inventory management system - SEHv1.05",
+  "version": "1.0.6",
+  "description": "Jigsaw puzzle inventory management system - SEHv1.06",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

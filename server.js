@@ -23,7 +23,8 @@ const WISHLIST_FILE = path.join(DATA_DIR, 'wishlist.json');
 const THEME_FILE = path.join(DATA_DIR, 'theme.json');
 
 const DEFAULT_SETTINGS = { brands: [], themes: [], series: [] };
-const DEFAULT_THEME = { primary: '#667eea', secondary: '#764ba2' };
+const DEFAULT_THEME = { primary: '#4e5d6c', secondary: '#4e5d6c', tone: 'warm' };
+const TONES = ['warm', 'cool'];
 
 const UPLOAD_TMP_DIR = path.join(os.tmpdir(), 'puzzle-inventory-uploads');
 
@@ -732,11 +733,12 @@ app.get('/api/theme', async (req, res) => {
 
 app.put('/api/theme', express.json(), async (req, res) => {
     try {
-        const { primary, secondary } = req.body || {};
+        const { primary, secondary = primary, tone = 'warm' } = req.body || {};
         if (!HEX_COLOR.test(primary) || !HEX_COLOR.test(secondary)) {
             throw new HttpError(400, 'Colors must be in #rrggbb format');
         }
-        await withLock(() => atomicWrite(THEME_FILE, { primary, secondary }));
+        if (!TONES.includes(tone)) throw new HttpError(400, 'Tone must be warm or cool');
+        await withLock(() => atomicWrite(THEME_FILE, { primary, secondary, tone }));
         res.json({ success: true });
     } catch (err) {
         sendError(res, err, 'Failed to update theme');
@@ -767,7 +769,7 @@ app.post('/api/restore', express.json({ limit: '50mb' }), async (req, res) => {
             }));
         const settings = backup.settings ? normalizeSettings(backup.settings) : null;
         const theme = backup.theme && HEX_COLOR.test(backup.theme.primary) && HEX_COLOR.test(backup.theme.secondary)
-            ? { primary: backup.theme.primary, secondary: backup.theme.secondary }
+            ? { primary: backup.theme.primary, secondary: backup.theme.secondary, tone: TONES.includes(backup.theme.tone) ? backup.theme.tone : 'warm' }
             : null;
 
         const savedTo = await withLock(async () => {
