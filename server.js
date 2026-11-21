@@ -3,6 +3,12 @@ const multer = require('multer');
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
+const os = require('os');
+const { version: APP_VERSION } = require('./package.json');
+
+// Keep image memory use low: no decoded-image cache, one image at a time
+sharp.cache(false);
+sharp.concurrency(1);
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -19,12 +25,19 @@ const THEME_FILE = path.join(DATA_DIR, 'theme.json');
 const DEFAULT_SETTINGS = { brands: [], themes: [], series: [] };
 const DEFAULT_THEME = { primary: '#667eea', secondary: '#764ba2' };
 
+const UPLOAD_TMP_DIR = path.join(os.tmpdir(), 'puzzle-inventory-uploads');
+
 const MAX_IMAGE_MB = 25;
 const MAX_IMAGES_PER_UPLOAD = 20;
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.static(PUBLIC_DIR));
+app.use(express.static(PUBLIC_DIR, {
+    setHeaders(res, filePath) {
+        if (filePath.endsWith('.webmanifest')) res.setHeader('Content-Type', 'application/manifest+json');
+        if (filePath.endsWith('sw.js')) res.setHeader('Cache-Control', 'no-cache');
+    }
+}));
 // Image filenames are unique and never reused, so browsers can cache them long-term
 app.use('/uploads', express.static(UPLOADS_ROOT, { maxAge: '30d', immutable: true }));
 
@@ -128,6 +141,8 @@ async function ensureStorage() {
     }
 
     // Leftover temp files from a crash are safe to remove
+    await fs.rm(UPLOAD_TMP_DIR, { recursive: true, force: true }).catch(() => {});
+    await fs.mkdir(UPLOAD_TMP_DIR, { recursive: true });
     for (const name of await fs.readdir(DATA_DIR)) {
         if (name.endsWith('.tmp')) await fs.unlink(path.join(DATA_DIR, name)).catch(() => {});
     }
@@ -227,14 +242,20 @@ function cleanWishlistItem(body) {
 // Images
 // ---------------------------------------------------------------------------
 
+// Uploads stream to temp files instead of RAM, so a big batch of phone
+// photos cannot exhaust memory on a small container.
 const upload = multer({
-    storage: multer.memoryStorage(),
+    dest: UPLOAD_TMP_DIR,
     limits: { fileSize: MAX_IMAGE_MB * 1024 * 1024, files: MAX_IMAGES_PER_UPLOAD },
     fileFilter: (req, file, cb) => {
         if (file.mimetype.startsWith('image/')) cb(null, true);
         else cb(new HttpError(400, `"${file.originalname}" is not an image`));
     }
 });
+
+async function removeTempUploads(files) {
+    await Promise.all((files || []).map(f => f.path && fs.unlink(f.path).catch(() => {})));
+}
 
 const isOurImage = url => typeof url === 'string' && /^\/uploads\/puzzles\/[\w.-]+$/.test(url);
 
@@ -256,7 +277,7 @@ async function processImages(puzzleId, files) {
         for (const file of files) {
             const filename = `${puzzleId}_${nextId()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
             try {
-                await sharp(file.buffer)
+                await sharp(file.path)
                     .rotate()
                     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
                     .jpeg({ quality: 85 })
@@ -487,6 +508,7 @@ app.post('/api/puzzles/:id/images', upload.array('images', MAX_IMAGES_PER_UPLOAD
     const id = parseId(req.params.id);
     const files = req.files || [];
     let urls = [];
+    let failure = null;
     try {
         if (files.length === 0) throw new HttpError(400, 'No images were uploaded');
         if (!(await readPuzzles()).some(p => p.id === id)) throw new HttpError(404, 'Puzzle not found');
@@ -505,11 +527,14 @@ app.post('/api/puzzles/:id/images', upload.array('images', MAX_IMAGES_PER_UPLOAD
             return null;
         });
         if (replaced) await deleteImageFile(replaced);
-        res.json({ images: urls });
     } catch (err) {
         await Promise.all(urls.map(deleteImageFile));
-        sendError(res, err, 'Failed to upload images');
+        failure = err;
     }
+    // Temp copies are removed before replying, success or not
+    await removeTempUploads(files);
+    if (failure) return sendError(res, failure, 'Failed to upload images');
+    res.json({ images: urls });
 });
 
 app.delete('/api/puzzles/:id/images/:imageIndex', async (req, res) => {
@@ -621,6 +646,31 @@ app.put('/api/settings', express.json(), async (req, res) => {
     }
 });
 
+const SETTINGS_KINDS = ['brands', 'themes', 'series'];
+
+function settingsItemRoute(method, change) {
+    app[method]('/api/settings/:kind', express.json(), async (req, res) => {
+        try {
+            const kind = req.params.kind;
+            if (!SETTINGS_KINDS.includes(kind)) throw new HttpError(404, 'Unknown settings list');
+            const value = str((req.body || {}).value);
+            if (!value) throw new HttpError(400, 'A value is required');
+            const settings = await withLock(async () => {
+                const current = await readSettings();
+                current[kind] = change(current[kind], value);
+                const updated = normalizeSettings(current);
+                await atomicWrite(SETTINGS_FILE, updated);
+                return updated;
+            });
+            res.json(settings);
+        } catch (err) {
+            sendError(res, err, 'Failed to update settings');
+        }
+    });
+}
+settingsItemRoute('post', (list, value) => [...list, value]);
+settingsItemRoute('delete', (list, value) => list.filter(v => v !== value));
+
 app.get('/api/wishlist', async (req, res) => {
     try {
         res.json(await readWishlist());
@@ -707,7 +757,8 @@ app.post('/api/restore', express.json({ limit: '50mb' }), async (req, res) => {
 
         const usedIds = new Set();
         const puzzles = backup.puzzles.map(p => normalizeRestoredPuzzle(p, usedIds));
-        const wishlist = (Array.isArray(backup.wishlist) ? backup.wishlist : [])
+        const hasWishlist = Array.isArray(backup.wishlist);
+        const wishlist = (hasWishlist ? backup.wishlist : [])
             .filter(w => w && str(w.name))
             .map(w => ({
                 id: Number.isFinite(Number(w.id)) ? Number(w.id) : nextId(),
@@ -728,13 +779,18 @@ app.post('/api/restore', express.json({ limit: '50mb' }), async (req, res) => {
             }
 
             await atomicWrite(DATA_FILE, puzzles);
-            await atomicWrite(WISHLIST_FILE, wishlist);
+            if (hasWishlist) await atomicWrite(WISHLIST_FILE, wishlist);
             if (settings) await atomicWrite(SETTINGS_FILE, settings);
             if (theme) await atomicWrite(THEME_FILE, theme);
             return path.basename(safetyDir);
         });
 
-        res.json({ success: true, puzzles: puzzles.length, wishlist: wishlist.length, previousDataSavedTo: `data/${savedTo}` });
+        res.json({
+            success: true,
+            puzzles: puzzles.length,
+            wishlist: hasWishlist ? wishlist.length : null, // null = backup had no wishlist, current one kept
+            previousDataSavedTo: `data/${savedTo}`
+        });
     } catch (err) {
         sendError(res, err, 'Failed to restore backup');
     }
@@ -743,6 +799,18 @@ app.post('/api/restore', express.json({ limit: '50mb' }), async (req, res) => {
 // ---------------------------------------------------------------------------
 // Fallback handlers
 // ---------------------------------------------------------------------------
+
+// For uptime monitors (Uptime Kuma etc.): 200 when the data files are readable, 503 otherwise
+app.get('/api/health', async (req, res) => {
+    try {
+        const puzzles = await readPuzzles();
+        await readSettings();
+        await readWishlist();
+        res.json({ status: 'ok', version: APP_VERSION, puzzles: puzzles.length, uptimeSeconds: Math.round(process.uptime()) });
+    } catch (err) {
+        res.status(503).json({ status: 'error', version: APP_VERSION, error: err.message });
+    }
+});
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

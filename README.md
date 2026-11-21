@@ -2,7 +2,7 @@
 
 A web-based inventory system for tracking jigsaw puzzles. Runs on Node.js with a small Express server and stores everything as JSON files, so there is no database to manage.
 
-**Version:** SEHv1.04
+**Version:** SEHv1.05
 
 ---
 
@@ -23,22 +23,38 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Deploying on Linux (recommended)
 
-Requires Node.js 18 or newer. On Ubuntu:
+Works on Ubuntu or Debian: a normal server, a VM, or a Proxmox container (CT).
+
+### Proxmox container
+
+Create an **Ubuntu 24.04 CT**: unprivileged, nesting on (the default), 1 core, 1 GB RAM, 16 GB disk, and a static IP or DHCP reservation. Then in its console, as root:
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
-
-Then, from a normal user account (not root):
-
-```bash
+apt update && apt install -y git curl
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs
 git clone https://github.com/RED-RED-RED/puzzle-inventory.git
 cd puzzle-inventory
-sudo bash install.sh
+bash install.sh
 ```
 
-This installs the app to `/opt/puzzle-inventory`, runs it as your user under systemd (starts on boot, restarts on crash), and sets up a nightly backup. The script prints the address to open when it finishes.
+Take a CT snapshot before each update so you can roll back in one click.
+
+### Any other Ubuntu/Debian machine
+
+Same steps, with `sudo` in front of the `apt`, `bash` and `curl | bash` commands.
+
+### What the installer does
+
+It installs the app to `/opt/puzzle-inventory`, runs it as a dedicated `puzzle` system user under systemd (starts on boot, restarts on crash), sets up a nightly backup, and checks that the app answers before it finishes. It prints the address to open.
+
+Options go in front of the command, for example `sudo PORT=8080 BACKUP_DIR=/mnt/nas/puzzles bash install.sh`:
+
+| Option | Default |
+|--------|---------|
+| `PORT` | `3000` |
+| `BACKUP_DIR` | `/var/backups/puzzle-inventory` |
+| `APP_DIR` | `/opt/puzzle-inventory` |
+| `APP_USER` | `puzzle` |
 
 ### Updating
 
@@ -48,7 +64,7 @@ git pull
 sudo bash install.sh
 ```
 
-Re-running the installer updates the code and restarts the app. It never touches `data/` or `uploads/` in the install folder.
+Re-running the installer updates the code and restarts the app. It never touches `data/` or `uploads/` in the install folder. Pass the same options again if you used any.
 
 ### Managing the service
 
@@ -58,7 +74,20 @@ sudo systemctl restart puzzle-inventory     # restart
 sudo journalctl -u puzzle-inventory -f      # live logs
 ```
 
-To use a different port, edit `Environment=PORT=3000` in `/etc/systemd/system/puzzle-inventory.service`, then `sudo systemctl daemon-reload && sudo systemctl restart puzzle-inventory`.
+### Monitoring
+
+`GET /api/health` returns `200 {"status":"ok",...}` when the app is up and its data files are readable, and `503` otherwise. Point Uptime Kuma (or similar) at `http://<server>:3000/api/health`.
+
+---
+
+## Using it on a phone
+
+Open the app's address in the phone's browser, then add it to the home screen:
+
+- **iPhone:** Safari > Share > **Add to Home Screen**. It opens full screen with its own icon.
+- **Android:** Chrome > menu > **Add to Home screen** (or **Install app**). Over plain `http://` Chrome adds a shortcut that opens in a browser tab; a full-screen install needs HTTPS.
+
+The phone needs to be on your home network (or connected by VPN, such as Tailscale) to reach the app. If it can't, it shows a "can't reach the server" page instead of a browser error (on HTTPS).
 
 ---
 
@@ -104,6 +133,7 @@ These archives live on the same disk as the app. For real protection, copy them 
 - **CSV export** of puzzles and wishlist for Excel, Numbers or Google Sheets
 - **Statistics** for each puzzle and across the collection
 - **Themeable** colors and dark mode
+- **Phone friendly**: compact layout on phones, and it can be added to the home screen like an app
 - **Managed dropdowns** for brands, themes and series/sets, editable in Settings
 
 ---
@@ -122,7 +152,11 @@ puzzle-inventory/
 │   └── backup.sh                         # Archives data/ and uploads/
 ├── public/
 │   ├── index.html             # Frontend UI
-│   └── app.js                 # Frontend logic
+│   ├── app.js                 # Frontend logic
+│   ├── manifest.webmanifest   # Home-screen app settings
+│   ├── sw.js                  # Service worker (offline page only)
+│   ├── offline.html           # Shown when the server can't be reached
+│   └── icons/                 # App icons
 ├── data/                      # Created at runtime (not in git)
 │   ├── puzzles.json
 │   ├── settings.json
@@ -208,14 +242,33 @@ All endpoints return JSON. Errors come back as `{ "error": "message" }` with an 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/settings` | Brands, themes and series lists |
-| PUT | `/api/settings` | Save settings |
+| PUT | `/api/settings` | Replace all settings |
+| POST | `/api/settings/:list` | `{ value }` adds to `brands`, `themes` or `series` |
+| DELETE | `/api/settings/:list` | `{ value }` removes from that list |
+| GET | `/api/health` | `200` when up and data is readable, `503` otherwise |
 | GET | `/api/theme` | UI colors |
 | PUT | `/api/theme` | `{ primary: "#rrggbb", secondary: "#rrggbb" }` |
-| POST | `/api/restore` | Replace all data from an in-app backup file (current data is copied to `data/pre-restore-*` first) |
+| POST | `/api/restore` | Replace all data from an in-app backup file (current data is copied to `data/pre-restore-*` first; a backup with no wishlist keeps the current one) |
 
 ---
 
 ## Changelog
+
+### SEHv1.05 - 2026-11-21
+**Phone and install:**
+- Phone layout: compact header, search/filter/list fold into a "Browse puzzles" button, and tapping a puzzle jumps straight to it. Fields no longer make iPhone zoom in.
+- Add to Home Screen support: app icon, full screen on iPhone, and an offline "can't reach the server" page over HTTPS
+- Installer creates a dedicated `puzzle` user instead of running as root, supports `PORT`, checks the app actually answers before finishing, and handles Proxmox containers without nesting
+- New `/api/health` endpoint for uptime monitors
+
+**Bug fixes:**
+- Some times showed as "1h 0m 60s" instead of "1h 1m"
+- Photo uploads are processed from temp files instead of memory, so large batches can't run a small container out of RAM
+- "Download Backup" could silently fail on Safari and iPhone
+- Wishlist prices typed with "$" or text showed "$NaN USD"
+- Restoring a backup with no wishlist emptied the current wishlist
+- Brands, themes or series added on two devices at once could drop off the list
+- Ratings on individual completions are now shown in the log list
 
 ### SEHv1.04 - 2026-11-15
 **New features:**

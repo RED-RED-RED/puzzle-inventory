@@ -36,6 +36,30 @@ async function refreshPuzzle(id = currentPuzzleId) {
     return puzzle;
 }
 
+// ---------------------------------------------------------------------------
+// Phone layout: the search/filter/list panel folds away so content shows first
+// ---------------------------------------------------------------------------
+
+const isPhoneLayout = () => window.matchMedia("(max-width: 768px)").matches;
+
+function setBrowsePanel(open) {
+    document.body.classList.toggle("browse-open", open);
+    const toggle = document.getElementById("mobileBrowseToggle");
+    if (toggle) toggle.setAttribute("aria-expanded", String(open));
+}
+
+function toggleBrowsePanel() {
+    setBrowsePanel(!document.body.classList.contains("browse-open"));
+}
+
+// After switching pages on a phone, close the list and bring the content into view
+function revealContent() {
+    if (!isPhoneLayout()) return;
+    setBrowsePanel(false);
+    const content = document.querySelector(".content-area");
+    if (content) window.scrollTo({ top: Math.max(0, content.getBoundingClientRect().top + window.scrollY - 8), behavior: "smooth" });
+}
+
 function toggleMissingCount(checkboxId, wrapId) {
     const checked = document.getElementById(checkboxId).checked;
     document.getElementById(wrapId).style.display = checked ? 'flex' : 'none';
@@ -130,6 +154,7 @@ function showWishlist() {
     currentPuzzleId = null;
     renderPuzzleList();
     renderWishlist();
+    revealContent();
 }
 
 function showAddWishlistModal() {
@@ -197,13 +222,14 @@ function renderWishlist() {
     // Sort by priority
     const sorted = [...wishlistItems].sort((a, b) => {
         const priorityOrder = { high: 0, medium: 1, low: 2 };
-        return priorityOrder[a.priority] - priorityOrder[b.priority];
+        return (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1);
     });
     
     container.innerHTML = sorted.map(item => {
-        const priorityClass = `priority-${item.priority}`;
-        const priorityText = item.priority.charAt(0).toUpperCase() + item.priority.slice(1);
-        const priceFormatted = item.price ? `$${parseFloat(item.price).toFixed(2)} USD` : '';
+        const priority = ['high', 'medium', 'low'].includes(item.priority) ? item.priority : 'medium';
+        const priorityClass = `priority-${priority}`;
+        const priorityText = priority.charAt(0).toUpperCase() + priority.slice(1);
+        const priceFormatted = formatPrice(item.price);
         const safeUrl = item.url && /^https?:\/\//i.test(item.url) ? item.url : null;
         const urlLink = safeUrl ? `<p><strong>Link:</strong> <a href="${escapeHtml(safeUrl)}" target="_blank" style="color: var(--primary-color); text-decoration: underline;">View Product</a></p>` : '';
 
@@ -228,6 +254,14 @@ function renderWishlist() {
     }).join('');
 }
 
+// Plain numbers ("25", "$25.5", "25.00") show as $25.50; anything else shows as typed
+function formatPrice(price) {
+    const text = String(price || '').trim();
+    if (!text) return '';
+    const plain = text.replace(/^\$\s*/, '').replace(/,/g, '');
+    return /^\d+(\.\d+)?$/.test(plain) ? "$" + Number(plain).toFixed(2) : text;
+}
+
 // Settings management
 async function loadSettings() {
     try {
@@ -238,12 +272,19 @@ async function loadSettings() {
     }
 }
 
-// Settings saves are chained so rapid adds (brand + theme + series in one
-// save) reach the server in order and none get lost.
+// Brand/theme/series changes are sent one item at a time and merged on the
+// server, so two devices adding at the same time cannot overwrite each other.
+// Requests are chained so they reach the server in order.
 let settingsSaveChain = Promise.resolve();
-function saveSettings() {
+function sendSettingsChange(kind, value, method) {
     settingsSaveChain = settingsSaveChain
-        .then(() => apiRequest("/api/settings", { method: "PUT", body: JSON.stringify(settings) }))
+        .then(() => apiRequest(`/api/settings/${kind}`, { method, body: JSON.stringify({ value }) }))
+        .then(updated => {
+            settings = updated;
+            if (document.getElementById("settingsPage").classList.contains("active")) {
+                renderBrandsList(); renderThemesList(); renderSeriesList();
+            }
+        })
         .catch(error => console.error("Failed to save settings:", error));
     return settingsSaveChain;
 }
@@ -252,15 +293,15 @@ function addManagedItem(kind, value) {
     const item = (value || "").trim();
     if (!settings[kind]) settings[kind] = [];
     if (!item || settings[kind].includes(item)) return false;
-    settings[kind].push(item);
+    settings[kind].push(item); // show it right away; the server reply replaces the list
     settings[kind].sort((a, b) => a.localeCompare(b));
-    saveSettings();
+    sendSettingsChange(kind, item, "POST");
     return true;
 }
 
 function removeManagedItem(kind, value) {
     settings[kind] = (settings[kind] || []).filter(v => v !== value);
-    saveSettings();
+    sendSettingsChange(kind, value, "DELETE");
 }
 
 const addBrand = brand => addManagedItem("brands", brand);
@@ -365,8 +406,11 @@ async function backupData() {
         const a = document.createElement('a');
         a.href = url;
         a.download = `puzzle-inventory-backup-${todayLocal()}.json`;
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        a.remove();
+        // Revoking straight away cancels the download in Safari
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
         
         showAlert('Backup created successfully!');
     } catch (error) {
@@ -405,7 +449,8 @@ async function handleRestoreFile(event) {
         const result = await apiRequest("/api/restore", { method: "POST", body: JSON.stringify(data) });
         await Promise.all([loadSettings(), loadTheme(), loadWishlist(), loadPuzzles()]);
         showDashboard();
-        showAlert(`Restored ${result.puzzles} puzzles and ${result.wishlist} wishlist items. Previous data was saved to ${result.previousDataSavedTo} on the server.`);
+        const wishlistText = result.wishlist === null ? "your current wishlist was kept (the backup had none)" : `${result.wishlist} wishlist items`;
+        showAlert(`Restored ${result.puzzles} puzzles and ${wishlistText}. Previous data was saved to ${result.previousDataSavedTo} on the server.`);
     } catch (error) {
         console.error("Restore failed:", error);
     }
@@ -519,6 +564,7 @@ function showDashboard() {
     currentPuzzleId = null;
     renderPuzzleList();
     renderDashboard();
+    revealContent();
 }
 
 function showSettings() {
@@ -539,6 +585,7 @@ function showSettings() {
     renderBrandsList();
     renderThemesList();
     renderSeriesList();
+    revealContent();
 }
 
 // Render dashboard
@@ -1058,6 +1105,8 @@ function renderPuzzleList() {
     }
 
     const list = getVisiblePuzzles();
+    const browseCount = document.getElementById("mobileBrowseCount");
+    if (browseCount) browseCount.textContent = list.length === puzzles.length ? `(${puzzles.length})` : `(${list.length} of ${puzzles.length})`;
     countEl.textContent = list.length === puzzles.length
         ? `${puzzles.length} puzzle${puzzles.length === 1 ? "" : "s"}`
         : `Showing ${list.length} of ${puzzles.length}`;
@@ -1116,6 +1165,7 @@ async function showPuzzleDetail(puzzleId) {
         renderNotes(puzzle);
         renderStats(puzzle);
         renderPuzzleList();
+        revealContent();
     } catch (error) {
         console.error('Failed to load puzzle details:', error);
     }
@@ -1245,11 +1295,13 @@ function timeToHours(hours, minutes, seconds) {
 
 // Helper function to convert total hours to hours/minutes/seconds
 function hoursToTime(totalHours) {
-    const hours = Math.floor(totalHours);
-    const remainingMinutes = (totalHours - hours) * 60;
-    const minutes = Math.floor(remainingMinutes);
-    const seconds = Math.round((remainingMinutes - minutes) * 60);
-    return { hours, minutes, seconds };
+    // Round to whole seconds first; splitting the float directly can give "0m 60s"
+    const totalSeconds = Math.round((Number(totalHours) || 0) * 3600);
+    return {
+        hours: Math.floor(totalSeconds / 3600),
+        minutes: Math.floor((totalSeconds % 3600) / 60),
+        seconds: totalSeconds % 60
+    };
 }
 
 // Format time for display
@@ -1319,6 +1371,9 @@ function renderLogs(puzzle) {
 
     logList.innerHTML = sortedLogs.map(log => {
         const timeFormatted = log.time > 0 ? formatTime(log.time) : "Not timed";
+        const logStars = log.rating > 0
+            ? `<span class="log-stars" title="${log.rating} of 5">${"★".repeat(log.rating)}${"☆".repeat(5 - log.rating)}</span>`
+            : "";
         
         return `
             <div class="log-item">
@@ -1326,6 +1381,7 @@ function renderLogs(puzzle) {
                     <div class="log-item-date">${parseLocalDate(log.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
                     <div class="log-item-time">${timeFormatted}</div>
                 </div>
+                ${logStars}
                 ${log.notes ? `<p style="color: #666; margin-top: 10px;">${escapeHtml(log.notes)}</p>` : ''}
                 <div style="margin-top: 10px; display: flex; gap: 10px;">
                     <button class="btn btn-secondary" style="padding: 8px 16px; font-size: 14px;" onclick="editLog(${log.id})">Edit</button>
@@ -1553,6 +1609,10 @@ function searchPuzzles() {
 
 // Initialize app
 loadListControls();
+
+if ("serviceWorker" in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register("/sw.js").catch(err => console.warn("Service worker not registered:", err));
+}
 
 Promise.all([
     loadTheme().catch(err => console.error('Theme load error:', err)),

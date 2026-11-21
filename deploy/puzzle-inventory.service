@@ -10,7 +10,7 @@ Group=__USER__
 WorkingDirectory=__APP_DIR__
 ExecStart=__NODE__ server.js
 Environment=NODE_ENV=production
-Environment=PORT=3000
+Environment=PORT=__PORT__
 
 Restart=on-failure
 RestartSec=5

@@ -4,6 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Jigsaw Puzzle Inventory</title>
+    <meta name="description" content="Track, organize, and enjoy your puzzle collection">
+    <meta name="theme-color" content="#667eea">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Puzzles">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <style>
         * {
             margin: 0;
@@ -1035,10 +1045,90 @@
             border: 1px solid #f5c6cb;
         }
 
+        .log-stars { color: #ffc107; font-size: 1.1em; display: block; margin-top: 6px; }
+
+        .mobile-browse-toggle { display: none; }
+
         @media (max-width: 768px) {
+            body { padding: 0; }
+
+            .container {
+                border-radius: 0;
+                box-shadow: none;
+                min-height: 100vh;
+            }
+
+            .header { padding: 14px 16px; }
+            .header h1 { font-size: 1.4em; margin-bottom: 0; }
+            .header p { display: none; }
+
             .main-content {
                 flex-direction: column;
+                min-height: 0;
             }
+
+            /* One page scroll on phones instead of two nested scroll areas */
+            .sidebar, .content-area {
+                max-height: none;
+                overflow: visible;
+            }
+
+            .sidebar { padding: 12px 16px; }
+            .content-area { padding: 16px; }
+
+            .nav-buttons { margin-bottom: 10px; }
+
+            .sidebar-actions {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+                margin-bottom: 10px;
+            }
+            .sidebar-actions .btn { padding: 12px 8px; font-size: 15px; margin: 0; }
+
+            .mobile-browse-toggle {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                width: 100%;
+                padding: 12px 14px;
+                border: 2px solid #dee2e6;
+                border-radius: 8px;
+                background: white;
+                color: #333;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            .mobile-browse-toggle .chevron { transition: transform 0.2s; }
+            body.browse-open .mobile-browse-toggle .chevron { transform: rotate(180deg); }
+
+            .browse-panel { display: none; margin-top: 12px; }
+            body.browse-open .browse-panel { display: block; }
+
+            /* 16px stops iPhone from zooming in when a field is tapped */
+            input, select, textarea, .list-controls select { font-size: 16px; }
+
+            .detail-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+                margin-bottom: 16px;
+                padding-bottom: 12px;
+            }
+            .detail-header h2 { font-size: 1.5em; }
+
+            .tabs {
+                overflow-x: auto;
+                gap: 0;
+                margin-bottom: 16px;
+                -webkit-overflow-scrolling: touch;
+            }
+            .tab { padding: 10px 14px; white-space: nowrap; flex-shrink: 0; }
+
+            .modal-content { width: 94%; padding: 20px; max-height: 92vh; }
+
+            .dashboard-header h2 { font-size: 1.5em; }
 
             .sidebar {
                 width: 100%;
@@ -1131,6 +1221,7 @@
             border-color: #3a3a55;
         }
         body.dark-mode .search-box::placeholder { color: #666688; }
+        body.dark-mode .mobile-browse-toggle { background: #1e1e2e; border-color: #3a3a5a; color: #e0e0f0; }
         body.dark-mode .list-controls select { background: #1e1e2e; border-color: #3a3a5a; color: #e0e0f0; }
         body.dark-mode .pick-card .pick-placeholder { background: #2a2a3e; }
         body.dark-mode .pick-card h3 { color: #e0e0f0; }
@@ -1161,8 +1252,15 @@
                     <button class="nav-btn" id="wishlistNavBtn" onclick="showWishlist()">Wishlist</button>
                     <button class="nav-btn" id="settingsNavBtn" onclick="showSettings()">Settings</button>
                 </div>
-                <button class="btn btn-primary btn-full" onclick="showAddPuzzleModal()">+ Add New Puzzle</button>
-                <button class="btn btn-secondary btn-full pick-btn" onclick="showPickModal()">🎲 Pick One for Me</button>
+                <div class="sidebar-actions">
+                    <button class="btn btn-primary btn-full" onclick="showAddPuzzleModal()">+ Add New Puzzle</button>
+                    <button class="btn btn-secondary btn-full pick-btn" onclick="showPickModal()">🎲 Pick One for Me</button>
+                </div>
+                <button class="mobile-browse-toggle" id="mobileBrowseToggle" onclick="toggleBrowsePanel()" aria-expanded="false" aria-controls="browsePanel">
+                    <span>🔍 Browse puzzles <span id="mobileBrowseCount"></span></span>
+                    <span class="chevron" aria-hidden="true">▾</span>
+                </button>
+                <div class="browse-panel" id="browsePanel">
                 <input type="text" class="search-box" id="searchBox" placeholder="Search puzzles..." oninput="searchPuzzles()">
                 <div class="list-controls">
                     <select id="sortSelect" aria-label="Sort puzzles" onchange="onListControlsChange()">
@@ -1195,6 +1293,7 @@
                     <div class="empty-state">
                         <h3>Loading...</h3>
                     </div>
+                </div>
                 </div>
             </div>
 
@@ -1343,7 +1442,7 @@
                     <div class="settings-section">
                         <h3>About</h3>
                         <p style="color: #666; line-height: 1.6;">
-                            <strong>Puzzle Inventory System SEHv1.04</strong><br>
+                            <strong>Puzzle Inventory System SEHv1.05</strong><br>
                             A comprehensive tool for tracking and managing your jigsaw puzzle collection.<br><br>
                             Features include image uploads, completion logs, statistics, and custom fields.
                         </p>
@@ -1375,7 +1474,7 @@
                 <div id="puzzleDetail" class="puzzle-detail">
                     <div class="detail-header">
                         <h2 id="puzzleTitle"></h2>
-                        <div>
+                        <div class="detail-actions">
                             <button class="btn btn-secondary" onclick="editPuzzle()" style="margin-right: 10px;">Edit</button>
                             <button class="btn btn-danger" onclick="deletePuzzle()">Delete</button>
                         </div>
@@ -1639,7 +1738,7 @@
         <div class="footer">
             Made with <span class="heart">❤</span> by Tom | 
             <span style="cursor: pointer; text-decoration: underline;" onclick="showAbout()">About</span> | 
-            <span style="font-weight: 600;">Version SEHv1.04</span>
+            <span style="font-weight: 600;">Version SEHv1.05</span>
         </div>
     </div>
 
@@ -1652,7 +1751,7 @@
             </div>
             <div style="padding: 20px; line-height: 1.8;">
                 <h3 style="color: var(--primary-color); margin-bottom: 15px;">Puzzle Inventory Manager</h3>
-                <p><strong>Version:</strong> SEHv1.04</p>
+                <p><strong>Version:</strong> SEHv1.05</p>
                 <p><strong>Created by:</strong> Tom</p>
                 <p style="margin-top: 20px;"><strong>Features:</strong></p>
                 <ul style="margin-left: 20px;">
