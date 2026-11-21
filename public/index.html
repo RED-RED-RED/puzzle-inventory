@@ -917,6 +917,70 @@
             margin-bottom: 15px;
         }
 
+        .list-controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: -5px 0 8px 0;
+        }
+
+        .list-controls select {
+            width: 100%;
+            padding: 8px;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            color: #333;
+        }
+
+        .list-controls .full-width { grid-column: 1 / -1; }
+
+        .list-count {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 10px;
+        }
+
+        .pick-btn { margin-top: 8px; margin-bottom: 15px; }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .missing-count {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 8px 0 0 30px;
+        }
+
+        .missing-count input { width: 120px; }
+
+        .pick-card {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            padding: 15px;
+            border: 2px solid var(--primary-color);
+            border-radius: 10px;
+        }
+
+        .pick-card img, .pick-card .pick-placeholder {
+            width: 90px;
+            height: 90px;
+            object-fit: cover;
+            border-radius: 8px;
+            flex-shrink: 0;
+            background: #f0f0f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+        }
+
         .file-input-wrapper {
             position: relative;
             overflow: hidden;
@@ -1067,6 +1131,9 @@
             border-color: #3a3a55;
         }
         body.dark-mode .search-box::placeholder { color: #666688; }
+        body.dark-mode .list-controls select { background: #1e1e2e; border-color: #3a3a5a; color: #e0e0f0; }
+        body.dark-mode .pick-card .pick-placeholder { background: #2a2a3e; }
+        body.dark-mode .pick-card h3 { color: #e0e0f0; }
 
         body.dark-mode .nav-btn {
             background: #2a2a3e;
@@ -1095,7 +1162,34 @@
                     <button class="nav-btn" id="settingsNavBtn" onclick="showSettings()">Settings</button>
                 </div>
                 <button class="btn btn-primary btn-full" onclick="showAddPuzzleModal()">+ Add New Puzzle</button>
-                <input type="text" class="search-box" id="searchBox" placeholder="Search puzzles..." onkeyup="searchPuzzles()">
+                <button class="btn btn-secondary btn-full pick-btn" onclick="showPickModal()">🎲 Pick One for Me</button>
+                <input type="text" class="search-box" id="searchBox" placeholder="Search puzzles..." oninput="searchPuzzles()">
+                <div class="list-controls">
+                    <select id="sortSelect" aria-label="Sort puzzles" onchange="onListControlsChange()">
+                        <option value="newest">Newest first</option>
+                        <option value="oldest">Oldest first</option>
+                        <option value="name">Name A to Z</option>
+                        <option value="piecesAsc">Fewest pieces</option>
+                        <option value="piecesDesc">Most pieces</option>
+                        <option value="rating">Highest rated</option>
+                        <option value="quality">Best quality score</option>
+                        <option value="lastDone">Recently completed</option>
+                        <option value="timesDone">Most completed</option>
+                    </select>
+                    <select id="filterSelect" aria-label="Filter puzzles" onchange="onListControlsChange()">
+                        <option value="all">All puzzles</option>
+                        <option value="notDone">Not done yet</option>
+                        <option value="done">Completed</option>
+                        <option value="kept">Not donated</option>
+                        <option value="donated">Donated</option>
+                        <option value="missing">Missing pieces</option>
+                        <option value="pickup">Passes pickup test</option>
+                    </select>
+                    <select id="brandFilterSelect" aria-label="Filter by brand" onchange="onListControlsChange()" class="full-width">
+                        <option value="">All brands</option>
+                    </select>
+                </div>
+                <div class="list-count" id="listCount"></div>
                 
                 <div class="puzzle-list" id="puzzleList">
                     <div class="empty-state">
@@ -1232,17 +1326,24 @@
                         </div>
                         
                         <input type="file" id="restoreFileInput" accept=".json" style="display: none;" onchange="handleRestoreFile(event)">
+
+                        <h4 style="margin: 25px 0 10px 0;">Export to Spreadsheet</h4>
+                        <p style="color: #666; margin-bottom: 15px;">Download a CSV file that opens in Excel, Numbers or Google Sheets</p>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-secondary" onclick="exportPuzzlesCsv()">📊 Export Puzzles (CSV)</button>
+                            <button class="btn btn-secondary" onclick="exportWishlistCsv()">📋 Export Wishlist (CSV)</button>
+                        </div>
                         
                         <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404;">
-                            <strong>⚠️ Important:</strong> Backups include puzzle data, settings, and theme preferences, but <strong>not images</strong>. 
-                            Images are stored in the <code>uploads/puzzles/</code> folder and should be backed up separately by copying that folder.
+                            <strong>⚠️ Note:</strong> This backup file includes all puzzle data, logs, wishlist and settings, but <strong>not the photo files</strong>.
+                            The nightly server backup includes photos (see the README).
                         </div>
                     </div>
 
                     <div class="settings-section">
                         <h3>About</h3>
                         <p style="color: #666; line-height: 1.6;">
-                            <strong>Puzzle Inventory System SEHv1.02</strong><br>
+                            <strong>Puzzle Inventory System SEHv1.04</strong><br>
                             A comprehensive tool for tracking and managing your jigsaw puzzle collection.<br><br>
                             Features include image uploads, completion logs, statistics, and custom fields.
                         </p>
@@ -1294,7 +1395,7 @@
 
                     <div id="imagesTab" class="tab-content">
                         <div class="file-input-wrapper" style="margin-bottom: 20px;">
-                            <input type="file" id="imageInput" multiple accept="image/*" onchange="handleImageUpload(event)" style="display: none;">
+                            <input type="file" id="imageInput" multiple accept="image/jpeg,image/png,image/webp,image/gif" onchange="handleImageUpload(event)" style="display: none;">
                             <label for="imageInput" class="file-input-label">+ Add Images</label>
                         </div>
                         <div class="image-gallery" id="imageGallery"></div>
@@ -1324,9 +1425,13 @@
                         
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
-                                <input type="checkbox" id="puzzleMissingPieces" onchange="updateMissingPieces()" style="width: auto; cursor: pointer;">
+                                <input type="checkbox" id="puzzleMissingPieces" onchange="toggleMissingCount('puzzleMissingPieces', 'puzzleMissingCountWrap'); updateMissingPieces()" style="width: auto; cursor: pointer;">
                                 <span>Missing pieces</span>
                             </label>
+                            <div id="puzzleMissingCountWrap" class="missing-count" style="display: none;">
+                                <label for="puzzleMissingCount">How many?</label>
+                                <input type="number" id="puzzleMissingCount" min="0" step="1" placeholder="Unknown" onchange="updateMissingPieces()">
+                            </div>
                         </div>
                         
                         <div class="form-group">
@@ -1534,7 +1639,7 @@
         <div class="footer">
             Made with <span class="heart">❤</span> by Tom | 
             <span style="cursor: pointer; text-decoration: underline;" onclick="showAbout()">About</span> | 
-            <span style="font-weight: 600;">Version SEHv1.02</span>
+            <span style="font-weight: 600;">Version SEHv1.04</span>
         </div>
     </div>
 
@@ -1547,7 +1652,7 @@
             </div>
             <div style="padding: 20px; line-height: 1.8;">
                 <h3 style="color: var(--primary-color); margin-bottom: 15px;">Puzzle Inventory Manager</h3>
-                <p><strong>Version:</strong> SEHv1.02</p>
+                <p><strong>Version:</strong> SEHv1.04</p>
                 <p><strong>Created by:</strong> Tom</p>
                 <p style="margin-top: 20px;"><strong>Features:</strong></p>
                 <ul style="margin-left: 20px;">
@@ -1593,7 +1698,7 @@
                 </div>
                 <div class="form-group">
                     <label>Number of Pieces *</label>
-                    <input type="number" id="puzzlePieces" required>
+                    <input type="number" id="puzzlePieces" required min="1" step="1">
                 </div>
                 <div class="form-group">
                     <label>Theme/Category</label>
@@ -1609,6 +1714,27 @@
                 <div class="form-group">
                     <label>Source</label>
                     <input type="text" id="puzzlePurchasedFrom" placeholder="e.g., Amazon, Target, Gift">
+                </div>
+                <div class="form-group">
+                    <label>Artist</label>
+                    <input type="text" id="puzzleArtist" placeholder="e.g., Charles Wysocki">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Finished Size</label>
+                        <input type="text" id="puzzleSize" placeholder="e.g., 27 x 20 in">
+                    </div>
+                    <div class="form-group">
+                        <label>Cut Style</label>
+                        <select id="puzzleCutStyle">
+                            <option value="">Not specified</option>
+                            <option value="Random cut">Random cut</option>
+                            <option value="Ribbon / grid cut">Ribbon / grid cut</option>
+                            <option value="Whimsy pieces">Whimsy pieces</option>
+                            <option value="Shaped / irregular">Shaped / irregular</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label>Series/Set Name</label>
@@ -1652,9 +1778,13 @@
                 
                 <div class="form-group">
                     <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
-                        <input type="checkbox" id="puzzleModalMissingPieces" style="width: auto; cursor: pointer;">
+                        <input type="checkbox" id="puzzleModalMissingPieces" onchange="toggleMissingCount('puzzleModalMissingPieces', 'puzzleModalMissingCountWrap')" style="width: auto; cursor: pointer;">
                         <span>Missing pieces</span>
                     </label>
+                    <div id="puzzleModalMissingCountWrap" class="missing-count" style="display: none;">
+                        <label for="puzzleModalMissingCount">How many?</label>
+                        <input type="number" id="puzzleModalMissingCount" min="0" step="1" placeholder="Unknown">
+                    </div>
                 </div>
                 
                 <div class="form-group">
@@ -1678,10 +1808,11 @@
                 
                 <h3 style="margin: 20px 0 15px 0; color: #333;">Optional: Upload Images</h3>
                 <div class="form-group">
-                    <input type="file" id="puzzleModalImage" accept="image/*" multiple style="padding: 8px;">
+                    <input type="file" id="puzzleModalImage" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="padding: 8px;">
                     <p style="font-size: 14px; color: #666; margin-top: 5px;">Upload one or more photos of the puzzle</p>
                 </div>
                 
+                <div id="initialLogSection">
                 <h3 style="margin: 20px 0 15px 0; color: #333;">Optional: Add Initial Completion Log</h3>
                 <div class="form-group">
                     <label style="display: flex; align-items: center; gap: 10px;">
@@ -1727,9 +1858,43 @@
                         <textarea id="initialLogNotes" placeholder="Any notes about completing this puzzle?"></textarea>
                     </div>
                 </div>
+                </div>
                 
                 <button type="submit" class="btn btn-primary btn-full" id="savePuzzleBtn">Save Puzzle</button>
             </form>
+        </div>
+    </div>
+
+    <!-- Pick One For Me Modal -->
+    <div id="pickModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>🎲 Pick One for Me</h2>
+                <button class="close-modal" onclick="closeModal('pickModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>Piece count (optional)</label>
+                <div class="form-row">
+                    <input type="number" id="pickMin" min="1" placeholder="Min">
+                    <input type="number" id="pickMax" min="1" placeholder="Max">
+                </div>
+            </div>
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                    <input type="checkbox" id="pickNotDone" checked style="width: auto;">
+                    <span>Only puzzles I haven't done yet</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-top: 8px;">
+                    <input type="checkbox" id="pickSkipDonated" checked style="width: auto;">
+                    <span>Skip donated puzzles</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-top: 8px;">
+                    <input type="checkbox" id="pickSkipMissing" checked style="width: auto;">
+                    <span>Skip puzzles with missing pieces</span>
+                </label>
+            </div>
+            <button class="btn btn-primary btn-full" onclick="pickRandomPuzzle()">Pick a Puzzle</button>
+            <div id="pickResult" style="margin-top: 20px;"></div>
         </div>
     </div>
 

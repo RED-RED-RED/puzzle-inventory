@@ -1,0 +1,12 @@
+# Template: install.sh fills in __USER__, __APP_DIR__ and __BACKUP_DIR__.
+[Unit]
+Description=Puzzle Inventory nightly backup
+
+[Service]
+Type=oneshot
+User=__USER__
+Group=__USER__
+Environment=APP_DIR=__APP_DIR__
+Environment=BACKUP_DIR=__BACKUP_DIR__
+Environment=KEEP=14
+ExecStart=/bin/bash __APP_DIR__/deploy/backup.sh

@@ -3,820 +3,799 @@ const multer = require('multer');
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
-const fsSync = require('fs');
 
-const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 
-// Middleware
-app.use(express.json());
-app.use(express.static('public'));
-app.use('/uploads', express.static('uploads'));
-
-// Ensure directories exist
-const UPLOADS_DIR = path.join(__dirname, 'uploads', 'puzzles');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const UPLOADS_ROOT = path.join(__dirname, 'uploads');
+const UPLOADS_DIR = path.join(UPLOADS_ROOT, 'puzzles');
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'puzzles.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const WISHLIST_FILE = path.join(DATA_DIR, 'wishlist.json');
 const THEME_FILE = path.join(DATA_DIR, 'theme.json');
 
-async function ensureDirectories() {
-    try {
-        await fs.mkdir(UPLOADS_DIR, { recursive: true });
-        await fs.mkdir(DATA_DIR, { recursive: true });
-        
-        // Create empty data files if they don't exist
-        try {
-            await fs.access(DATA_FILE);
-        } catch {
-            await fs.writeFile(DATA_FILE, JSON.stringify([]));
-        }
-        
-        try {
-            await fs.access(SETTINGS_FILE);
-        } catch {
-            await fs.writeFile(SETTINGS_FILE, JSON.stringify({ brands: [], themes: [], series: [] }));
-        }
-        
-        try {
-            await fs.access(WISHLIST_FILE);
-        } catch {
-            await fs.writeFile(WISHLIST_FILE, JSON.stringify([]));
-        }
-        
-        try {
-            await fs.access(THEME_FILE);
-        } catch {
-            await fs.writeFile(THEME_FILE, JSON.stringify({ primary: '#667eea', secondary: '#764ba2' }));
-        }
-    } catch (error) {
-        console.error('Error creating directories:', error);
+const DEFAULT_SETTINGS = { brands: [], themes: [], series: [] };
+const DEFAULT_THEME = { primary: '#667eea', secondary: '#764ba2' };
+
+const MAX_IMAGE_MB = 25;
+const MAX_IMAGES_PER_UPLOAD = 20;
+
+const app = express();
+app.disable('x-powered-by');
+app.use(express.static(PUBLIC_DIR));
+// Image filenames are unique and never reused, so browsers can cache them long-term
+app.use('/uploads', express.static(UPLOADS_ROOT, { maxAge: '30d', immutable: true }));
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+class HttpError extends Error {
+    constructor(status, message) {
+        super(message);
+        this.status = status;
     }
 }
 
-// Configure multer for memory storage (we'll process before saving)
+function sendError(res, err, fallbackMessage) {
+    if (err instanceof HttpError) {
+        return res.status(err.status).json({ error: err.message });
+    }
+    console.error(`${fallbackMessage}:`, err);
+    res.status(500).json({ error: fallbackMessage });
+}
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+// All reads-then-writes go through this queue so two requests can never
+// interleave and overwrite each other's changes.
+let writeQueue = Promise.resolve();
+function withLock(fn) {
+    const run = writeQueue.then(() => fn());
+    writeQueue = run.catch(() => {});
+    return run;
+}
+
+// Missing file -> default value. Unreadable or corrupt file -> throw, so we
+// never "fix" a corrupt file by saving an empty list over it.
+async function readJson(file, fallback) {
+    let text;
+    try {
+        text = await fs.readFile(file, 'utf8');
+    } catch (err) {
+        if (err.code === 'ENOENT') return structuredClone(fallback);
+        throw err;
+    }
+    try {
+        return JSON.parse(text);
+    } catch (err) {
+        throw new Error(`${path.basename(file)} contains invalid JSON and was not modified`);
+    }
+}
+
+// Write to a temp file, flush it to disk, then rename over the target.
+// rename() is atomic on Linux, so the file always holds either the old or
+// the new contents, even across a crash or power loss.
+async function atomicWrite(file, data) {
+    const tmp = `${file}.${process.pid}.tmp`;
+    const handle = await fs.open(tmp, 'w');
+    try {
+        await handle.writeFile(JSON.stringify(data, null, 2));
+        await handle.sync();
+    } finally {
+        await handle.close();
+    }
+    await fs.rename(tmp, file);
+}
+
+const readPuzzles = () => readJson(DATA_FILE, []);
+const readWishlist = () => readJson(WISHLIST_FILE, []);
+const readTheme = () => readJson(THEME_FILE, DEFAULT_THEME);
+async function readSettings() {
+    return normalizeSettings(await readJson(SETTINGS_FILE, DEFAULT_SETTINGS));
+}
+
+// IDs are timestamps, but guaranteed unique even when created in the same millisecond
+let lastId = 0;
+function nextId() {
+    const now = Date.now();
+    lastId = now > lastId ? now : lastId + 1;
+    return lastId;
+}
+
+async function ensureStorage() {
+    await fs.mkdir(UPLOADS_DIR, { recursive: true });
+    await fs.mkdir(DATA_DIR, { recursive: true });
+
+    const files = [
+        [DATA_FILE, []],
+        [SETTINGS_FILE, DEFAULT_SETTINGS],
+        [WISHLIST_FILE, []],
+        [THEME_FILE, DEFAULT_THEME]
+    ];
+    for (const [file, fallback] of files) {
+        try {
+            await fs.access(file);
+        } catch {
+            await atomicWrite(file, fallback);
+        }
+        // Refuse to start on a corrupt file rather than risk overwriting it
+        await readJson(file, fallback);
+    }
+
+    // Leftover temp files from a crash are safe to remove
+    for (const name of await fs.readdir(DATA_DIR)) {
+        if (name.endsWith('.tmp')) await fs.unlink(path.join(DATA_DIR, name)).catch(() => {});
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation and normalization
+// ---------------------------------------------------------------------------
+
+const str = v => (v == null ? '' : String(v)).trim();
+const bool = v => v === true || v === 'true';
+
+function intInRange(v, min, max, fallback) {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < min || n > max) return fallback;
+    return n;
+}
+
+function isValidDateString(v) {
+    if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+    const [y, m, d] = v.split('-').map(Number);
+    const date = new Date(Date.UTC(y, m - 1, d));
+    return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+}
+
+const STRING_FIELDS = ['brand', 'theme', 'series', 'artist', 'size', 'cutStyle', 'location', 'purchasedFrom', 'condition', 'puzzleDust'];
+const BOOLEAN_FIELDS = ['passesPickup', 'missingPieces', 'donated'];
+
+// Only known fields are accepted from the client. With partial=true, only
+// the fields present in the body are validated and returned.
+function cleanPuzzleFields(body, partial) {
+    const out = {};
+    const has = key => !partial || Object.prototype.hasOwnProperty.call(body, key);
+
+    if (has('name')) {
+        out.name = str(body.name);
+        if (!out.name) throw new HttpError(400, 'Puzzle name is required');
+    }
+    if (has('pieces')) {
+        out.pieces = intInRange(body.pieces, 1, 1000000, null);
+        if (out.pieces === null) throw new HttpError(400, 'Piece count must be a whole number of 1 or more');
+    }
+    if (has('rating')) out.rating = intInRange(body.rating, 0, 5, 0);
+    if (has('missingPieceCount')) out.missingPieceCount = intInRange(body.missingPieceCount, 0, 1000000, 0);
+    if (has('notes')) out.notes = body.notes == null ? '' : String(body.notes);
+    for (const key of STRING_FIELDS) if (has(key)) out[key] = str(body[key]);
+    for (const key of BOOLEAN_FIELDS) if (has(key)) out[key] = bool(body[key]);
+    return out;
+}
+
+function cleanLog(body) {
+    if (!isValidDateString(body.date)) {
+        throw new HttpError(400, 'A valid completion date is required');
+    }
+    const time = Number(body.time ?? 0);
+    if (!Number.isFinite(time) || time < 0) {
+        throw new HttpError(400, 'Time cannot be negative');
+    }
+    return {
+        date: body.date,
+        time, // hours; 0 means "not timed"
+        rating: intInRange(body.rating, 0, 5, 0),
+        notes: body.notes == null ? '' : String(body.notes)
+    };
+}
+
+function uniqueStrings(list) {
+    if (!Array.isArray(list)) return [];
+    return [...new Set(list.map(str).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeSettings(s) {
+    s = s && typeof s === 'object' ? s : {};
+    return { ...s, brands: uniqueStrings(s.brands), themes: uniqueStrings(s.themes), series: uniqueStrings(s.series) };
+}
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+const WISHLIST_PRIORITIES = ['high', 'medium', 'low'];
+function cleanWishlistItem(body) {
+    const name = str(body.name);
+    if (!name) throw new HttpError(400, 'Wishlist item name is required');
+    return {
+        name,
+        brand: str(body.brand),
+        pieces: str(body.pieces),
+        theme: str(body.theme),
+        whereToBuy: str(body.whereToBuy),
+        url: str(body.url),
+        price: str(body.price),
+        priority: WISHLIST_PRIORITIES.includes(body.priority) ? body.priority : 'medium',
+        notes: body.notes == null ? '' : String(body.notes)
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: {
-        fileSize: 10 * 1024 * 1024 // 10MB limit
-    },
+    limits: { fileSize: MAX_IMAGE_MB * 1024 * 1024, files: MAX_IMAGES_PER_UPLOAD },
     fileFilter: (req, file, cb) => {
-        if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-        } else {
-            cb(new Error('Only image files are allowed'));
-        }
+        if (file.mimetype.startsWith('image/')) cb(null, true);
+        else cb(new HttpError(400, `"${file.originalname}" is not an image`));
     }
 });
 
-// Atomic write: writes to a .tmp file then renames over the target.
-// On Linux, rename() is atomic — the target either has the old content or the new content, never a partial write.
-let pendingWrites = 0;
+const isOurImage = url => typeof url === 'string' && /^\/uploads\/puzzles\/[\w.-]+$/.test(url);
 
-async function atomicWrite(filePath, data) {
-    const tmpPath = filePath + '.tmp';
-    pendingWrites++;
+// Only ever deletes files inside uploads/puzzles, no matter what the data says
+async function deleteImageFile(url) {
+    if (!isOurImage(url)) return;
     try {
-        await fs.writeFile(tmpPath, data);
-        await fs.rename(tmpPath, filePath);
-    } finally {
-        pendingWrites--;
+        await fs.unlink(path.join(UPLOADS_DIR, path.basename(url)));
+    } catch (err) {
+        if (err.code !== 'ENOENT') console.error('Error deleting image file:', err);
     }
 }
 
-// Read puzzles data
-async function readPuzzles() {
+// Resize, auto-rotate from the camera's orientation tag, and save as JPEG.
+// Returns the public URLs. If any file fails, every file written so far is removed.
+async function processImages(puzzleId, files) {
+    const urls = [];
     try {
-        const data = await fs.readFile(DATA_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        console.error('Error reading puzzles:', error);
-        return [];
+        for (const file of files) {
+            const filename = `${puzzleId}_${nextId()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+            try {
+                await sharp(file.buffer)
+                    .rotate()
+                    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+                    .jpeg({ quality: 85 })
+                    .toFile(path.join(UPLOADS_DIR, filename));
+            } catch (err) {
+                console.error('Image processing failed:', err.message);
+                throw new HttpError(400, `Could not read "${file.originalname}". Use JPEG, PNG, WebP or GIF.`);
+            }
+            urls.push(`/uploads/puzzles/${filename}`);
+        }
+        return urls;
+    } catch (err) {
+        await Promise.all(urls.map(deleteImageFile));
+        throw err;
     }
 }
 
-// Write puzzles data
-async function writePuzzles(puzzles) {
-    try {
-        await atomicWrite(DATA_FILE, JSON.stringify(puzzles, null, 2));
-    } catch (error) {
-        console.error('Error writing puzzles:', error);
-        throw error;
+// ---------------------------------------------------------------------------
+// Puzzle helpers
+// ---------------------------------------------------------------------------
+
+const parseId = v => Number(v);
+
+// Locked read-modify-write of a single puzzle. fn may throw HttpError to abort
+// without writing anything.
+function mutatePuzzle(id, fn) {
+    return withLock(async () => {
+        const puzzles = await readPuzzles();
+        const puzzle = puzzles.find(p => p.id === id);
+        if (!puzzle) throw new HttpError(404, 'Puzzle not found');
+        const result = await fn(puzzle, puzzles);
+        await writePuzzles(puzzles);
+        return result;
+    });
+}
+
+const writePuzzles = puzzles => atomicWrite(DATA_FILE, puzzles);
+
+function clampThumbnail(puzzle) {
+    const count = puzzle.images.length;
+    if (!Number.isInteger(puzzle.thumbnailIndex) || puzzle.thumbnailIndex < 0 || puzzle.thumbnailIndex >= count) {
+        puzzle.thumbnailIndex = 0;
     }
 }
 
-// Read settings data
-async function readSettings() {
+// Makes a puzzle from a backup file safe to store
+function normalizeRestoredPuzzle(p, usedIds) {
+    if (!p || typeof p !== 'object') throw new HttpError(400, 'Backup contains an invalid puzzle entry');
+    let fields;
     try {
-        const data = await fs.readFile(SETTINGS_FILE, 'utf8');
-        const settings = JSON.parse(data);
-        // Ensure series array exists for older settings files
-        if (!settings.series) settings.series = [];
-        return settings;
-    } catch (error) {
-        console.error('Error reading settings:', error);
-        return { brands: [], themes: [], series: [] };
+        fields = cleanPuzzleFields({ rating: 0, notes: '', ...p }, false);
+    } catch (err) {
+        throw new HttpError(400, `Backup puzzle "${str(p.name) || 'unnamed'}": ${err.message}`);
     }
+
+    let id = Number(p.id);
+    if (!Number.isFinite(id) || usedIds.has(id)) id = nextId();
+    usedIds.add(id);
+    if (id > lastId) lastId = id;
+
+    const images = Array.isArray(p.images) ? p.images.filter(isOurImage) : [];
+    const logs = (Array.isArray(p.logs) ? p.logs : []).map(log => {
+        let clean;
+        try {
+            clean = cleanLog(log || {});
+        } catch {
+            return null; // skip unreadable log entries rather than fail the whole restore
+        }
+        return { ...clean, id: Number.isFinite(Number(log.id)) ? Number(log.id) : nextId(), createdAt: log.createdAt || new Date().toISOString() };
+    }).filter(Boolean);
+    const customFields = (Array.isArray(p.customFields) ? p.customFields : [])
+        .filter(f => f && str(f.name || f.label) && str(f.value))
+        .map(f => ({ id: Number.isFinite(Number(f.id)) ? Number(f.id) : nextId(), name: str(f.name || f.label), value: str(f.value) }));
+
+    const restored = {
+        ...fields,
+        id,
+        images,
+        logs,
+        customFields,
+        thumbnailIndex: Number(p.thumbnailIndex) || 0,
+        createdAt: p.createdAt || new Date().toISOString()
+    };
+    if (p.quality && typeof p.quality === 'object') restored.quality = p.quality;
+    clampThumbnail(restored);
+    return restored;
 }
 
-// Write settings data
-async function writeSettings(settings) {
-    try {
-        await atomicWrite(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-    } catch (error) {
-        console.error('Error writing settings:', error);
-        throw error;
-    }
-}
+// ---------------------------------------------------------------------------
+// Puzzle routes
+// ---------------------------------------------------------------------------
 
-// Read wishlist data
-async function readWishlist() {
-    try {
-        const data = await fs.readFile(WISHLIST_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        console.error('Error reading wishlist:', error);
-        return [];
-    }
-}
-
-// Write wishlist data
-async function writeWishlist(wishlist) {
-    try {
-        await atomicWrite(WISHLIST_FILE, JSON.stringify(wishlist, null, 2));
-    } catch (error) {
-        console.error('Error writing wishlist:', error);
-        throw error;
-    }
-}
-
-// Read theme data
-async function readTheme() {
-    try {
-        const data = await fs.readFile(THEME_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        console.error('Error reading theme:', error);
-        return { primary: '#667eea', secondary: '#764ba2' };
-    }
-}
-
-// Write theme data
-async function writeTheme(theme) {
-    try {
-        await atomicWrite(THEME_FILE, JSON.stringify(theme, null, 2));
-    } catch (error) {
-        console.error('Error writing theme:', error);
-        throw error;
-    }
-}
-
-// API Routes
-
-// Get all puzzles
 app.get('/api/puzzles', async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        res.json(puzzles);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to retrieve puzzles' });
+        res.json(await readPuzzles());
+    } catch (err) {
+        sendError(res, err, 'Failed to retrieve puzzles');
     }
 });
 
-// Get single puzzle
 app.get('/api/puzzles/:id', async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
+        const puzzle = (await readPuzzles()).find(p => p.id === parseId(req.params.id));
+        if (!puzzle) throw new HttpError(404, 'Puzzle not found');
         res.json(puzzle);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to retrieve puzzle' });
+    } catch (err) {
+        sendError(res, err, 'Failed to retrieve puzzle');
     }
 });
 
-// Create puzzle
-app.post('/api/puzzles', async (req, res) => {
+app.post('/api/puzzles', express.json(), async (req, res) => {
     try {
-        // Validation
-        const name = (req.body.name || '').trim();
-        if (!name) {
-            return res.status(400).json({ error: 'Puzzle name is required' });
-        }
-        const pieces = parseInt(req.body.pieces);
-        if (isNaN(pieces) || pieces < 1) {
-            return res.status(400).json({ error: 'Piece count must be a positive number' });
-        }
-
-        const puzzles = await readPuzzles();
-        const newPuzzle = {
-            id: Date.now(),
-            ...req.body,
-            name: name,
-            pieces: pieces,
-            images: [],
-            logs: [],
-            customFields: [],
-            thumbnailIndex: 0,
-            createdAt: new Date().toISOString()
-        };
-        puzzles.push(newPuzzle);
-        await writePuzzles(puzzles);
-        res.json(newPuzzle);
-    } catch (error) {
-        console.error('Failed to create puzzle:', error);
-        res.status(500).json({ error: 'Failed to create puzzle: ' + error.message });
+        const fields = cleanPuzzleFields({ rating: 0, notes: '', ...req.body }, false);
+        const puzzle = await withLock(async () => {
+            const puzzles = await readPuzzles();
+            const newPuzzle = {
+                id: nextId(),
+                ...fields,
+                images: [],
+                logs: [],
+                customFields: [],
+                thumbnailIndex: 0,
+                createdAt: new Date().toISOString()
+            };
+            puzzles.push(newPuzzle);
+            await writePuzzles(puzzles);
+            return newPuzzle;
+        });
+        res.json(puzzle);
+    } catch (err) {
+        sendError(res, err, 'Failed to create puzzle');
     }
 });
 
-// Update puzzle
-app.put('/api/puzzles/:id', async (req, res) => {
+app.put('/api/puzzles/:id', express.json(), async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const index = puzzles.findIndex(p => p.id === parseInt(req.params.id));
-        if (index === -1) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        // Update puzzle while preserving complex data structures (images, logs, customFields, quality)
-        puzzles[index] = {
-            ...puzzles[index],
-            ...req.body,
-            id: puzzles[index].id, // Don't allow ID changes
-            images: puzzles[index].images, // Preserve images
-            logs: puzzles[index].logs, // Preserve logs
-            customFields: puzzles[index].customFields, // Preserve custom fields
-            quality: puzzles[index].quality, // Preserve quality data
-            thumbnailIndex: puzzles[index].thumbnailIndex // Preserve thumbnail
-        };
-        
-        await writePuzzles(puzzles);
-        res.json(puzzles[index]);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update puzzle' });
+        const fields = cleanPuzzleFields(req.body || {}, true);
+        const puzzle = await mutatePuzzle(parseId(req.params.id), p => {
+            Object.assign(p, fields);
+            return p;
+        });
+        res.json(puzzle);
+    } catch (err) {
+        sendError(res, err, 'Failed to update puzzle');
     }
 });
 
-// Delete puzzle
 app.delete('/api/puzzles/:id', async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        // Delete associated images
-        for (const image of puzzle.images) {
-            const imagePath = path.join(__dirname, image);
-            try {
-                await fs.unlink(imagePath);
-            } catch (err) {
-                console.error('Error deleting image:', err);
-            }
-        }
-        
-        const filteredPuzzles = puzzles.filter(p => p.id !== parseInt(req.params.id));
-        await writePuzzles(filteredPuzzles);
+        const id = parseId(req.params.id);
+        const removed = await withLock(async () => {
+            const puzzles = await readPuzzles();
+            const puzzle = puzzles.find(p => p.id === id);
+            if (!puzzle) throw new HttpError(404, 'Puzzle not found');
+            await writePuzzles(puzzles.filter(p => p.id !== id));
+            return puzzle;
+        });
+        // Only remove image files once the puzzle is safely gone from the data file
+        await Promise.all((removed.images || []).map(deleteImageFile));
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete puzzle' });
+    } catch (err) {
+        sendError(res, err, 'Failed to delete puzzle');
     }
 });
 
-// Upload images for a puzzle
-app.post('/api/puzzles/:id/images', upload.array('images', 10), async (req, res) => {
+// Single-field updates from the detail view
+function fieldRoute(route, field, coerce, label) {
+    app.put(`/api/puzzles/:id/${route}`, express.json(), async (req, res) => {
+        try {
+            await mutatePuzzle(parseId(req.params.id), p => {
+                p[field] = coerce((req.body || {})[field]);
+            });
+            res.json({ success: true });
+        } catch (err) {
+            sendError(res, err, `Failed to update ${label}`);
+        }
+    });
+}
+fieldRoute('notes', 'notes', v => (v == null ? '' : String(v)), 'notes');
+fieldRoute('condition', 'condition', str, 'condition');
+fieldRoute('puzzle-dust', 'puzzleDust', str, 'puzzle dust');
+fieldRoute('passes-pickup', 'passesPickup', bool, 'pickup test status');
+fieldRoute('donated', 'donated', bool, 'donation status');
+
+app.put('/api/puzzles/:id/missing-pieces', express.json(), async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        const replaceIndex = req.body.replaceIndex !== undefined ? parseInt(req.body.replaceIndex) : null;
-        const imageUrls = [];
-        
-        for (const file of req.files) {
-            const filename = `${puzzle.id}_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
-            const filepath = path.join(UPLOADS_DIR, filename);
-            
-            // Process image: resize to max 1200px width/height, compress
-            await sharp(file.buffer)
-                .resize(1200, 1200, {
-                    fit: 'inside',
-                    withoutEnlargement: true
-                })
-                .jpeg({ quality: 85 })
-                .toFile(filepath);
-            
-            const imageUrl = `/uploads/puzzles/${filename}`;
-            imageUrls.push(imageUrl);
-            
-            // If replaceIndex is specified, replace that image
-            if (replaceIndex !== null && replaceIndex >= 0 && replaceIndex < puzzle.images.length) {
-                // Delete old image file
-                const oldImagePath = path.join(__dirname, puzzle.images[replaceIndex]);
-                try {
-                    await fs.unlink(oldImagePath);
-                } catch (err) {
-                    console.error('Error deleting old image file:', err);
-                }
-                
-                // Replace the image at that index
-                puzzle.images[replaceIndex] = imageUrl;
-            } else {
-                // Otherwise add as new image
-                puzzle.images.push(imageUrl);
-            }
-        }
-        
-        await writePuzzles(puzzles);
-        res.json({ images: imageUrls });
-    } catch (error) {
-        console.error('Upload error:', error);
-        res.status(500).json({ error: 'Failed to upload images' });
+        const body = req.body || {};
+        await mutatePuzzle(parseId(req.params.id), p => {
+            p.missingPieces = bool(body.missingPieces);
+            if (!p.missingPieces) p.missingPieceCount = 0;
+            else if (body.missingPieceCount !== undefined) p.missingPieceCount = intInRange(body.missingPieceCount, 0, 1000000, 0);
+        });
+        res.json({ success: true });
+    } catch (err) {
+        sendError(res, err, 'Failed to update missing pieces status');
     }
 });
 
-// Delete an image
+app.put('/api/puzzles/:id/thumbnail', express.json(), async (req, res) => {
+    try {
+        await mutatePuzzle(parseId(req.params.id), p => {
+            const index = intInRange((req.body || {}).thumbnailIndex, 0, p.images.length - 1, null);
+            if (index === null) throw new HttpError(400, 'Invalid image index');
+            p.thumbnailIndex = index;
+        });
+        res.json({ success: true });
+    } catch (err) {
+        sendError(res, err, 'Failed to update thumbnail');
+    }
+});
+
+app.put('/api/puzzles/:id/quality', express.json(), async (req, res) => {
+    try {
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Invalid quality data');
+        await mutatePuzzle(parseId(req.params.id), p => {
+            p.quality = body;
+        });
+        res.json({ success: true });
+    } catch (err) {
+        sendError(res, err, 'Failed to update quality data');
+    }
+});
+
+// --- Images ---
+
+app.post('/api/puzzles/:id/images', upload.array('images', MAX_IMAGES_PER_UPLOAD), async (req, res) => {
+    const id = parseId(req.params.id);
+    const files = req.files || [];
+    let urls = [];
+    try {
+        if (files.length === 0) throw new HttpError(400, 'No images were uploaded');
+        if (!(await readPuzzles()).some(p => p.id === id)) throw new HttpError(404, 'Puzzle not found');
+
+        // Slow image processing happens outside the lock
+        urls = await processImages(id, files);
+
+        const replaced = await mutatePuzzle(id, p => {
+            const replaceIndex = req.body.replaceIndex !== undefined ? Number(req.body.replaceIndex) : null;
+            if (replaceIndex !== null && urls.length === 1 && Number.isInteger(replaceIndex) && replaceIndex >= 0 && replaceIndex < p.images.length) {
+                const old = p.images[replaceIndex];
+                p.images[replaceIndex] = urls[0];
+                return old;
+            }
+            p.images.push(...urls);
+            return null;
+        });
+        if (replaced) await deleteImageFile(replaced);
+        res.json({ images: urls });
+    } catch (err) {
+        await Promise.all(urls.map(deleteImageFile));
+        sendError(res, err, 'Failed to upload images');
+    }
+});
+
 app.delete('/api/puzzles/:id/images/:imageIndex', async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        const imageIndex = parseInt(req.params.imageIndex);
-        if (imageIndex < 0 || imageIndex >= puzzle.images.length) {
-            return res.status(404).json({ error: 'Image not found' });
-        }
-        
-        const imagePath = path.join(__dirname, puzzle.images[imageIndex]);
-        try {
-            await fs.unlink(imagePath);
-        } catch (err) {
-            console.error('Error deleting image file:', err);
-        }
-        
-        puzzle.images.splice(imageIndex, 1);
-        // Keep thumbnailIndex in bounds after deletion
-        if (puzzle.thumbnailIndex >= puzzle.images.length) {
-            puzzle.thumbnailIndex = Math.max(0, puzzle.images.length - 1);
-        }
-        await writePuzzles(puzzles);
+        const removed = await mutatePuzzle(parseId(req.params.id), p => {
+            const index = intInRange(req.params.imageIndex, 0, p.images.length - 1, null);
+            if (index === null) throw new HttpError(404, 'Image not found');
+            const [url] = p.images.splice(index, 1);
+            // Keep the same image as thumbnail when an earlier image is removed
+            if (index < p.thumbnailIndex) p.thumbnailIndex -= 1;
+            clampThumbnail(p);
+            return url;
+        });
+        await deleteImageFile(removed);
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete image' });
+    } catch (err) {
+        sendError(res, err, 'Failed to delete image');
     }
 });
 
-// Add completion log
-app.post('/api/puzzles/:id/logs', async (req, res) => {
+// --- Completion logs ---
+
+app.post('/api/puzzles/:id/logs', express.json(), async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-
-        // Validation
-        if (!req.body.date || isNaN(Date.parse(req.body.date))) {
-            return res.status(400).json({ error: 'A valid completion date is required' });
-        }
-        const time = parseFloat(req.body.time);
-        if (isNaN(time) || time <= 0) {
-            return res.status(400).json({ error: 'Time must be a positive number' });
-        }
-        
-        const newLog = {
-            id: Date.now(),
-            ...req.body,
-            time: time,
-            createdAt: new Date().toISOString()
-        };
-        
-        puzzle.logs.push(newLog);
-        await writePuzzles(puzzles);
-        res.json(newLog);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to add log' });
+        const log = { id: nextId(), ...cleanLog(req.body || {}), createdAt: new Date().toISOString() };
+        await mutatePuzzle(parseId(req.params.id), p => {
+            p.logs.push(log);
+        });
+        res.json(log);
+    } catch (err) {
+        sendError(res, err, 'Failed to add log');
     }
 });
 
-// Delete completion log
+app.put('/api/puzzles/:id/logs/:logId', express.json(), async (req, res) => {
+    try {
+        const changes = cleanLog(req.body || {});
+        const updated = await mutatePuzzle(parseId(req.params.id), p => {
+            const log = p.logs.find(l => l.id === parseId(req.params.logId));
+            if (!log) throw new HttpError(404, 'Log not found');
+            Object.assign(log, changes);
+            return log;
+        });
+        res.json(updated);
+    } catch (err) {
+        sendError(res, err, 'Failed to update log');
+    }
+});
+
 app.delete('/api/puzzles/:id/logs/:logId', async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.logs = puzzle.logs.filter(l => l.id !== parseInt(req.params.logId));
-        await writePuzzles(puzzles);
+        await mutatePuzzle(parseId(req.params.id), p => {
+            p.logs = p.logs.filter(l => l.id !== parseId(req.params.logId));
+        });
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete log' });
+    } catch (err) {
+        sendError(res, err, 'Failed to delete log');
     }
 });
 
-// Update log
-app.put('/api/puzzles/:id/logs/:logId', async (req, res) => {
+// --- Custom fields ---
+
+app.post('/api/puzzles/:id/custom-fields', express.json(), async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        const logIndex = puzzle.logs.findIndex(l => l.id === parseInt(req.params.logId));
-        if (logIndex === -1) {
-            return res.status(404).json({ error: 'Log not found' });
-        }
-        
-        puzzle.logs[logIndex] = {
-            ...puzzle.logs[logIndex],
-            ...req.body
-        };
-        
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update log' });
+        const name = str((req.body || {}).name);
+        const value = str((req.body || {}).value);
+        if (!name) throw new HttpError(400, 'Custom field name is required');
+        if (!value) throw new HttpError(400, 'Custom field value is required');
+        const field = { id: nextId(), name, value };
+        await mutatePuzzle(parseId(req.params.id), p => {
+            p.customFields.push(field);
+        });
+        res.json(field);
+    } catch (err) {
+        sendError(res, err, 'Failed to add custom field');
     }
 });
 
-// Update notes
-app.put('/api/puzzles/:id/notes', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.notes = req.body.notes;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update notes' });
-    }
-});
-
-// Update puzzle dust
-app.put('/api/puzzles/:id/puzzle-dust', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.puzzleDust = req.body.puzzleDust;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update puzzle dust' });
-    }
-});
-
-// Update donation status
-app.put('/api/puzzles/:id/donated', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.donated = req.body.donated;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update donation status' });
-    }
-});
-
-// Update condition
-app.put('/api/puzzles/:id/condition', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.condition = req.body.condition;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update condition' });
-    }
-});
-
-// Update passes pickup test
-app.put('/api/puzzles/:id/passes-pickup', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.passesPickup = req.body.passesPickup;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update passes pickup status' });
-    }
-});
-
-// Update thumbnail
-app.put('/api/puzzles/:id/thumbnail', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.thumbnailIndex = req.body.thumbnailIndex;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update thumbnail' });
-    }
-});
-
-// Update missing pieces
-app.put('/api/puzzles/:id/missing-pieces', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.missingPieces = req.body.missingPieces;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update missing pieces status' });
-    }
-});
-
-// Update PQI
-app.put('/api/puzzles/:id/pqi', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.pqi = req.body;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update PQI' });
-    }
-});
-
-// Update quality data
-app.put('/api/puzzles/:id/quality', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.quality = req.body;
-        await writePuzzles(puzzles);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update quality data' });
-    }
-});
-
-// Add custom field
-app.post('/api/puzzles/:id/custom-fields', async (req, res) => {
-    try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-
-        // Validation
-        const label = (req.body.name || '').trim();
-        const value = (req.body.value || '').trim();
-        if (!label) {
-            return res.status(400).json({ error: 'Custom field name is required' });
-        }
-        if (!value) {
-            return res.status(400).json({ error: 'Custom field value is required' });
-        }
-
-        const newField = {
-            id: Date.now(),
-            ...req.body,
-            name: label,
-            value: value
-        };
-        
-        puzzle.customFields.push(newField);
-        await writePuzzles(puzzles);
-        res.json(newField);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to add custom field' });
-    }
-});
-
-// Delete custom field
 app.delete('/api/puzzles/:id/custom-fields/:fieldId', async (req, res) => {
     try {
-        const puzzles = await readPuzzles();
-        const puzzle = puzzles.find(p => p.id === parseInt(req.params.id));
-        
-        if (!puzzle) {
-            return res.status(404).json({ error: 'Puzzle not found' });
-        }
-        
-        puzzle.customFields = puzzle.customFields.filter(f => f.id !== parseInt(req.params.fieldId));
-        await writePuzzles(puzzles);
+        await mutatePuzzle(parseId(req.params.id), p => {
+            p.customFields = p.customFields.filter(f => f.id !== parseId(req.params.fieldId));
+        });
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete custom field' });
+    } catch (err) {
+        sendError(res, err, 'Failed to delete custom field');
     }
 });
 
-// Settings endpoints
+// ---------------------------------------------------------------------------
+// Settings, wishlist, theme
+// ---------------------------------------------------------------------------
+
 app.get('/api/settings', async (req, res) => {
     try {
-        const settings = await readSettings();
-        res.json(settings);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to retrieve settings' });
+        res.json(await readSettings());
+    } catch (err) {
+        sendError(res, err, 'Failed to retrieve settings');
     }
 });
 
-app.put('/api/settings', async (req, res) => {
+app.put('/api/settings', express.json(), async (req, res) => {
     try {
-        await writeSettings(req.body);
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update settings' });
+        const settings = normalizeSettings(req.body);
+        await withLock(() => atomicWrite(SETTINGS_FILE, settings));
+        res.json(settings);
+    } catch (err) {
+        sendError(res, err, 'Failed to update settings');
     }
 });
 
-// Wishlist endpoints
 app.get('/api/wishlist', async (req, res) => {
     try {
-        const wishlist = await readWishlist();
-        res.json(wishlist);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to retrieve wishlist' });
+        res.json(await readWishlist());
+    } catch (err) {
+        sendError(res, err, 'Failed to retrieve wishlist');
     }
 });
 
-app.post('/api/wishlist', async (req, res) => {
+app.post('/api/wishlist', express.json(), async (req, res) => {
     try {
-        // Validation
-        const name = (req.body.name || '').trim();
-        if (!name) {
-            return res.status(400).json({ error: 'Wishlist item name is required' });
-        }
-
-        const wishlist = await readWishlist();
-        const newItem = {
-            id: Date.now(),
-            ...req.body,
-            name: name,
-            addedDate: new Date().toISOString()
-        };
-        wishlist.push(newItem);
-        await writeWishlist(wishlist);
-        res.json(newItem);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to add wishlist item' });
+        const item = { id: nextId(), ...cleanWishlistItem(req.body || {}), addedDate: new Date().toISOString() };
+        await withLock(async () => {
+            const wishlist = await readWishlist();
+            wishlist.push(item);
+            await atomicWrite(WISHLIST_FILE, wishlist);
+        });
+        res.json(item);
+    } catch (err) {
+        sendError(res, err, 'Failed to add wishlist item');
     }
 });
 
-app.put('/api/wishlist/:id', async (req, res) => {
+app.put('/api/wishlist/:id', express.json(), async (req, res) => {
     try {
-        const wishlist = await readWishlist();
-        const index = wishlist.findIndex(w => w.id === parseInt(req.params.id));
-        
-        if (index === -1) {
-            return res.status(404).json({ error: 'Wishlist item not found' });
-        }
-        
-        wishlist[index] = {
-            ...wishlist[index],
-            ...req.body,
-            id: wishlist[index].id,
-            addedDate: wishlist[index].addedDate
-        };
-        
-        await writeWishlist(wishlist);
-        res.json(wishlist[index]);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update wishlist item' });
+        const changes = cleanWishlistItem(req.body || {});
+        const item = await withLock(async () => {
+            const wishlist = await readWishlist();
+            const existing = wishlist.find(w => w.id === parseId(req.params.id));
+            if (!existing) throw new HttpError(404, 'Wishlist item not found');
+            Object.assign(existing, changes);
+            await atomicWrite(WISHLIST_FILE, wishlist);
+            return existing;
+        });
+        res.json(item);
+    } catch (err) {
+        sendError(res, err, 'Failed to update wishlist item');
     }
 });
 
 app.delete('/api/wishlist/:id', async (req, res) => {
     try {
-        const wishlist = await readWishlist();
-        const filtered = wishlist.filter(w => w.id !== parseInt(req.params.id));
-        await writeWishlist(filtered);
+        await withLock(async () => {
+            const wishlist = await readWishlist();
+            await atomicWrite(WISHLIST_FILE, wishlist.filter(w => w.id !== parseId(req.params.id)));
+        });
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete wishlist item' });
+    } catch (err) {
+        sendError(res, err, 'Failed to delete wishlist item');
     }
 });
 
-// Theme endpoints
 app.get('/api/theme', async (req, res) => {
     try {
-        const theme = await readTheme();
-        res.json(theme);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to retrieve theme' });
+        res.json(await readTheme());
+    } catch (err) {
+        sendError(res, err, 'Failed to retrieve theme');
     }
 });
 
-app.put('/api/theme', async (req, res) => {
+app.put('/api/theme', express.json(), async (req, res) => {
     try {
-        await writeTheme(req.body);
+        const { primary, secondary } = req.body || {};
+        if (!HEX_COLOR.test(primary) || !HEX_COLOR.test(secondary)) {
+            throw new HttpError(400, 'Colors must be in #rrggbb format');
+        }
+        await withLock(() => atomicWrite(THEME_FILE, { primary, secondary }));
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update theme' });
+    } catch (err) {
+        sendError(res, err, 'Failed to update theme');
     }
 });
 
-// Graceful shutdown: wait for any in-flight atomic writes to finish before exiting.
-// systemd sends SIGTERM on `systemctl stop` — without this, a write could be interrupted
-// mid-rename and we'd lose data.
-function shutdown(signal) {
-    console.log(`Received ${signal}. Waiting for pending writes to complete...`);
-    const check = () => {
-        if (pendingWrites > 0) {
-            setTimeout(check, 50);
-        } else {
-            console.log('All writes complete. Exiting.');
-            process.exit(0);
-        }
-    };
-    check();
-    // Safety timeout: force exit after 5 seconds regardless
-    setTimeout(() => {
-        console.error('Shutdown timeout reached. Forcing exit.');
-        process.exit(1);
-    }, 5000);
-}
+// ---------------------------------------------------------------------------
+// Restore from backup
+// ---------------------------------------------------------------------------
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT',  () => shutdown('SIGINT'));
+// Replaces all data in one locked step. Keeps logs, custom fields, quality
+// scores and image references. Never deletes image files. A copy of the
+// current data is saved to data/pre-restore-<timestamp>/ first.
+app.post('/api/restore', express.json({ limit: '50mb' }), async (req, res) => {
+    try {
+        const backup = req.body || {};
+        if (!Array.isArray(backup.puzzles)) throw new HttpError(400, 'This does not look like a Puzzle Inventory backup file');
 
-// Start server
-ensureDirectories().then(() => {
-    const server = app.listen(PORT, () => {
-        console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║     🧩  Puzzle Inventory Server Running!  🧩             ║
-║                                                           ║
-║     Server: http://localhost:${PORT}                        ║
-║     Data files:                                           ║
-║       - Puzzles: ./data/puzzles.json                     ║
-║       - Settings: ./data/settings.json                   ║
-║       - Wishlist: ./data/wishlist.json                   ║
-║       - Theme: ./data/theme.json                         ║
-║     Images: ./uploads/puzzles/                           ║
-║                                                           ║
-╚═══════════════════════════════════════════════════════════╝
-        `);
-    });
+        const usedIds = new Set();
+        const puzzles = backup.puzzles.map(p => normalizeRestoredPuzzle(p, usedIds));
+        const wishlist = (Array.isArray(backup.wishlist) ? backup.wishlist : [])
+            .filter(w => w && str(w.name))
+            .map(w => ({
+                id: Number.isFinite(Number(w.id)) ? Number(w.id) : nextId(),
+                ...cleanWishlistItem(w),
+                addedDate: w.addedDate || new Date().toISOString()
+            }));
+        const settings = backup.settings ? normalizeSettings(backup.settings) : null;
+        const theme = backup.theme && HEX_COLOR.test(backup.theme.primary) && HEX_COLOR.test(backup.theme.secondary)
+            ? { primary: backup.theme.primary, secondary: backup.theme.secondary }
+            : null;
+
+        const savedTo = await withLock(async () => {
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const safetyDir = path.join(DATA_DIR, `pre-restore-${stamp}`);
+            await fs.mkdir(safetyDir);
+            for (const file of [DATA_FILE, SETTINGS_FILE, WISHLIST_FILE, THEME_FILE]) {
+                await fs.copyFile(file, path.join(safetyDir, path.basename(file))).catch(() => {});
+            }
+
+            await atomicWrite(DATA_FILE, puzzles);
+            await atomicWrite(WISHLIST_FILE, wishlist);
+            if (settings) await atomicWrite(SETTINGS_FILE, settings);
+            if (theme) await atomicWrite(THEME_FILE, theme);
+            return path.basename(safetyDir);
+        });
+
+        res.json({ success: true, puzzles: puzzles.length, wishlist: wishlist.length, previousDataSavedTo: `data/${savedTo}` });
+    } catch (err) {
+        sendError(res, err, 'Failed to restore backup');
+    }
 });
+
+// ---------------------------------------------------------------------------
+// Fallback handlers
+// ---------------------------------------------------------------------------
+
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Turns upload and body-parsing errors into readable JSON instead of an HTML stack trace
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        const messages = {
+            LIMIT_FILE_SIZE: `An image is too large (max ${MAX_IMAGE_MB} MB each)`,
+            LIMIT_FILE_COUNT: `Too many images at once (max ${MAX_IMAGES_PER_UPLOAD})`,
+            LIMIT_UNEXPECTED_FILE: `Too many images at once (max ${MAX_IMAGES_PER_UPLOAD})`
+        };
+        return res.status(400).json({ error: messages[err.code] || err.message });
+    }
+    if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request is too large' });
+    if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Request body is not valid JSON' });
+    console.error('Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+// ---------------------------------------------------------------------------
+// Startup and shutdown
+// ---------------------------------------------------------------------------
+
+let server;
+
+// systemd sends SIGTERM on stop/restart. Stop taking requests, let any
+// queued writes finish, then exit.
+function shutdown(signal) {
+    console.log(`Received ${signal}, finishing pending writes...`);
+    setTimeout(() => {
+        console.error('Shutdown timed out, exiting anyway.');
+        process.exit(1);
+    }, 8000).unref();
+    if (server) server.close();
+    writeQueue.then(() => {
+        console.log('Shutdown complete.');
+        process.exit(0);
+    });
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+ensureStorage()
+    .then(() => {
+        server = app.listen(PORT, HOST, () => {
+            console.log(`Puzzle Inventory running on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+            console.log(`Data: ${DATA_DIR}`);
+            console.log(`Images: ${UPLOADS_DIR}`);
+        });
+    })
+    .catch(err => {
+        console.error('Startup failed:', err.message);
+        console.error('Fix or restore the file above, then start the service again. Nothing was overwritten.');
+        process.exit(1);
+    });

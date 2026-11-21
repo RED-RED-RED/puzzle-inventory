@@ -1,0 +1,5 @@
+# Store and check out text files with LF line endings on every OS.
+# install.sh and the systemd files break on Linux if they contain CRLF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

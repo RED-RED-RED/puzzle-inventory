@@ -13,8 +13,51 @@ function escapeHtml(str) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
+
+// Dates are stored as "YYYY-MM-DD" in local time. new Date("YYYY-MM-DD") parses
+// as UTC midnight, which shows the previous day in US time zones, so never use it.
+function todayLocal() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function parseLocalDate(value) {
+    const [y, m, d] = String(value).split('-').map(Number);
+    return new Date(y, (m || 1) - 1, d || 1);
+}
+
+// Fetch one puzzle and keep the local cache in sync. Anything that changes a
+// puzzle should refresh through here so the Edit modal never shows stale data.
+async function refreshPuzzle(id = currentPuzzleId) {
+    const puzzle = await apiRequest(`/api/puzzles/${id}`);
+    const index = puzzles.findIndex(p => p.id === id);
+    if (index !== -1) puzzles[index] = puzzle;
+    else puzzles.push(puzzle);
+    return puzzle;
+}
+
+function toggleMissingCount(checkboxId, wrapId) {
+    const checked = document.getElementById(checkboxId).checked;
+    document.getElementById(wrapId).style.display = checked ? 'flex' : 'none';
+}
+
+// Selects a value in a fixed dropdown, adding it as an option if an older
+// value is not in the list so it is never silently lost on save.
+function setSelectValue(selectId, value) {
+    const select = document.getElementById(selectId);
+    if (value && ![...select.options].some(o => o.value === value)) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+    }
+    select.value = value;
+}
+
 let editingPuzzleId = null;
 let editingWishlistId = null;
+let convertingWishlistId = null; // wishlist item being moved into the collection
+let lastPickedId = null;        // last "Pick One for Me" result
 let wishlistItems = [];
 let settings = {
     brands: [],
@@ -174,7 +217,8 @@ function renderWishlist() {
                 ${urlLink}
                 ${priceFormatted ? `<p><strong>Price:</strong> ${escapeHtml(priceFormatted)}</p>` : ''}
                 ${item.notes ? `<p style="margin-top: 10px;"><em>${escapeHtml(item.notes)}</em></p>` : ''}
-                <div style="margin-top: 15px; display: flex; gap: 10px;">
+                <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-success" style="padding: 8px 16px; font-size: 14px;" onclick="convertWishlistItem(${item.id})" title="Move this puzzle into your collection">✓ Got It</button>
                     <button class="btn btn-secondary" style="padding: 8px 16px; font-size: 14px;" onclick="editWishlistItem(${item.id})">Edit</button>
                     <button class="btn btn-danger" style="padding: 8px 16px; font-size: 14px;" onclick="deleteWishlistItem(${item.id})">Remove</button>
                 </div>
@@ -194,104 +238,83 @@ async function loadSettings() {
     }
 }
 
-async function saveSettings() {
-    try {
-        await apiRequest('/api/settings', {
-            method: 'PUT',
-            body: JSON.stringify(settings)
-        });
-    } catch (error) {
-        console.error('Failed to save settings:', error);
-    }
+// Settings saves are chained so rapid adds (brand + theme + series in one
+// save) reach the server in order and none get lost.
+let settingsSaveChain = Promise.resolve();
+function saveSettings() {
+    settingsSaveChain = settingsSaveChain
+        .then(() => apiRequest("/api/settings", { method: "PUT", body: JSON.stringify(settings) }))
+        .catch(error => console.error("Failed to save settings:", error));
+    return settingsSaveChain;
 }
 
-function addBrand(brand) {
-    if (brand && !settings.brands.includes(brand)) {
-        settings.brands.push(brand);
-        settings.brands.sort();
-        saveSettings();
-        return true;
-    }
-    return false;
+function addManagedItem(kind, value) {
+    const item = (value || "").trim();
+    if (!settings[kind]) settings[kind] = [];
+    if (!item || settings[kind].includes(item)) return false;
+    settings[kind].push(item);
+    settings[kind].sort((a, b) => a.localeCompare(b));
+    saveSettings();
+    return true;
 }
 
-function removeBrand(brand) {
-    settings.brands = settings.brands.filter(b => b !== brand);
+function removeManagedItem(kind, value) {
+    settings[kind] = (settings[kind] || []).filter(v => v !== value);
     saveSettings();
 }
 
-function addTheme(theme) {
-    if (theme && !settings.themes.includes(theme)) {
-        settings.themes.push(theme);
-        settings.themes.sort();
-        saveSettings();
-        return true;
+const addBrand = brand => addManagedItem("brands", brand);
+const removeBrand = brand => removeManagedItem("brands", brand);
+const addTheme = theme => addManagedItem("themes", theme);
+const removeTheme = theme => removeManagedItem("themes", theme);
+
+// Delete buttons pass the list index rather than the name, so names with
+// quotes or other special characters cannot break the HTML.
+function deleteManagedItem(kind, index) {
+    const value = (settings[kind] || [])[index];
+    if (value === undefined) return;
+    removeManagedItem(kind, value);
+    if (kind === "brands") { renderBrandsList(); updateBrandDropdowns(); }
+    if (kind === "themes") { renderThemesList(); updateThemeDropdowns(); }
+    if (kind === "series") { renderSeriesList(); updateSeriesDropdowns(); }
+}
+
+function renderManagedList(containerId, kind, emptyText) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const items = settings[kind] || [];
+    if (items.length === 0) {
+        container.innerHTML = `<p style="color: #666;">${emptyText}</p>`;
+        return;
     }
-    return false;
+    container.innerHTML = items.map((item, index) => `
+        <div class="custom-field-item">
+            <div><strong>${escapeHtml(item)}</strong></div>
+            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="deleteManagedItem('${kind}', ${index})">Delete</button>
+        </div>
+    `).join("");
 }
 
-function removeTheme(theme) {
-    settings.themes = settings.themes.filter(t => t !== theme);
-    saveSettings();
-}
+function renderBrandsList() { renderManagedList("brandsList", "brands", "No brands defined yet."); }
+function renderThemesList() { renderManagedList("themesList", "themes", "No themes defined yet."); }
 
-function renderBrandsList() {
-    const container = document.getElementById('brandsList');
-    if (settings.brands.length === 0) {
-        container.innerHTML = '<p style="color: #666;">No brands defined yet.</p>';
-    } else {
-        container.innerHTML = settings.brands.map(brand => `
-            <div class="custom-field-item">
-                <div><strong>${brand}</strong></div>
-                <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="removeBrand('${brand.replace(/'/g, "\\'")}'); renderBrandsList(); updateBrandDropdowns();">Delete</button>
-            </div>
-        `).join('');
-    }
-}
-
-function renderThemesList() {
-    const container = document.getElementById('themesList');
-    if (settings.themes.length === 0) {
-        container.innerHTML = '<p style="color: #666;">No themes defined yet.</p>';
-    } else {
-        container.innerHTML = settings.themes.map(theme => `
-            <div class="custom-field-item">
-                <div><strong>${theme}</strong></div>
-                <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="removeTheme('${theme.replace(/'/g, "\\'")}'); renderThemesList(); updateThemeDropdowns();">Delete</button>
-            </div>
-        `).join('');
-    }
-}
-
-function updateBrandDropdowns() {
-    const select = document.getElementById('puzzleBrand');
+function fillManagedDropdown(selectId, kind, addLabel) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
     const currentValue = select.value;
-    
+    const items = settings[kind] || [];
     select.innerHTML = `
         <option value="">Select or type new...</option>
-        ${settings.brands.map(brand => `<option value="${brand}">${brand}</option>`).join('')}
-        <option value="__new__">+ Add New Brand</option>
+        ${items.map(item => `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`).join("")}
+        <option value="__new__">${addLabel}</option>
     `;
-    
-    if (currentValue && currentValue !== '__new__') {
+    if (currentValue && currentValue !== "__new__" && items.includes(currentValue)) {
         select.value = currentValue;
     }
 }
 
-function updateThemeDropdowns() {
-    const select = document.getElementById('puzzleTheme');
-    const currentValue = select.value;
-    
-    select.innerHTML = `
-        <option value="">Select or type new...</option>
-        ${settings.themes.map(theme => `<option value="${theme}">${theme}</option>`).join('')}
-        <option value="__new__">+ Add New Theme</option>
-    `;
-    
-    if (currentValue && currentValue !== '__new__') {
-        select.value = currentValue;
-    }
-}
+function updateBrandDropdowns() { fillManagedDropdown("puzzleBrand", "brands", "+ Add New Brand"); }
+function updateThemeDropdowns() { fillManagedDropdown("puzzleTheme", "themes", "+ Add New Theme"); }
 
 function handleBrandChange() {
     const select = document.getElementById('puzzleBrand');
@@ -341,7 +364,7 @@ async function backupData() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `puzzle-inventory-backup-${new Date().toISOString().split('T')[0]}.json`;
+        a.download = `puzzle-inventory-backup-${todayLocal()}.json`;
         a.click();
         URL.revokeObjectURL(url);
         
@@ -358,77 +381,34 @@ function restoreData() {
 
 async function handleRestoreFile(event) {
     const file = event.target.files[0];
+    event.target.value = "";
     if (!file) return;
-    
-    if (!confirm('This will replace all current data. Are you sure you want to restore from this backup?')) {
-        event.target.value = '';
+
+    let data;
+    try {
+        data = JSON.parse(await file.text());
+    } catch {
+        showAlert("That file could not be read as a backup (invalid JSON)", "error");
         return;
     }
-    
-    try {
-        const text = await file.text();
-        const data = JSON.parse(text);
-        
-        // Restore settings
-        if (data.settings) {
-            await apiRequest('/api/settings', {
-                method: 'PUT',
-                body: JSON.stringify(data.settings)
-            });
-            settings = data.settings;
-        }
-        
-        // Restore theme
-        if (data.theme && data.theme.primary && data.theme.secondary) {
-            await applyTheme(data.theme.primary, data.theme.secondary);
-        }
-        
-        // Restore wishlist
-        if (data.wishlist && Array.isArray(data.wishlist)) {
-            // Delete all existing wishlist items
-            const existingWishlist = await apiRequest('/api/wishlist');
-            for (const item of existingWishlist) {
-                await apiRequest(`/api/wishlist/${item.id}`, { method: 'DELETE' });
-            }
-            
-            // Create new wishlist items from backup
-            for (const item of data.wishlist) {
-                const { id, addedDate, ...itemData } = item;
-                await apiRequest('/api/wishlist', {
-                    method: 'POST',
-                    body: JSON.stringify(itemData)
-                });
-            }
-        }
-        
-        // Restore puzzles (note: this won't restore images, those need to be backed up separately)
-        if (data.puzzles && Array.isArray(data.puzzles)) {
-            // Delete all existing puzzles first
-            const existingPuzzles = await apiRequest('/api/puzzles');
-            for (const puzzle of existingPuzzles) {
-                await apiRequest(`/api/puzzles/${puzzle.id}`, { method: 'DELETE' });
-            }
-            
-            // Create new puzzles from backup
-            for (const puzzle of data.puzzles) {
-                const { id, images, createdAt, ...puzzleData } = puzzle;
-                await apiRequest('/api/puzzles', {
-                    method: 'POST',
-                    body: JSON.stringify(puzzleData)
-                });
-            }
-        }
-        
-        await loadPuzzles();
-        await loadWishlist();
-        showDashboard();
-        showAlert('Data restored successfully! Note: Images need to be re-uploaded.', 'success');
-    } catch (error) {
-        console.error('Restore failed:', error);
-        showAlert('Restore failed: ' + error.message, 'error');
+    if (!data || !Array.isArray(data.puzzles)) {
+        showAlert("That file does not look like a Puzzle Inventory backup", "error");
+        return;
     }
-    
-    event.target.value = '';
+
+    const wishlistCount = Array.isArray(data.wishlist) ? data.wishlist.length : 0;
+    if (!confirm(`Replace ALL current data with this backup?\n\nThe backup has ${data.puzzles.length} puzzles and ${wishlistCount} wishlist items.\nA copy of your current data is saved on the server first.`)) {
+        return;
+    }
+
+    try {
+        const result = await apiRequest("/api/restore", { method: "POST", body: JSON.stringify(data) });
+        await Promise.all([loadSettings(), loadTheme(), loadWishlist(), loadPuzzles()]);
+        showDashboard();
+        showAlert(`Restored ${result.puzzles} puzzles and ${result.wishlist} wishlist items. Previous data was saved to ${result.previousDataSavedTo} on the server.`);
+    } catch (error) {
+        console.error("Restore failed:", error);
+    }
 }
 
 // Theme management
@@ -569,8 +549,9 @@ function renderDashboard() {
     const allLogs = puzzles.flatMap(p => p.logs || []);
     const totalCompletions = allLogs.length;
     const totalHours = allLogs.reduce((sum, log) => sum + (log.time || 0), 0);
-    const avgRating = puzzles.length > 0 
-        ? (puzzles.reduce((sum, p) => sum + (p.rating || 0), 0) / puzzles.length).toFixed(1)
+    const ratedPuzzles = puzzles.filter(p => p.rating > 0);
+    const avgRating = ratedPuzzles.length
+        ? (ratedPuzzles.reduce((sum, p) => sum + p.rating, 0) / ratedPuzzles.length).toFixed(1)
         : 0;
     const donatedCount = puzzles.filter(p => p.donated).length;
 
@@ -709,6 +690,7 @@ function closeModal(modalId) {
 // Show add puzzle modal
 function showAddPuzzleModal() {
     editingPuzzleId = null;
+    convertingWishlistId = null;
     document.getElementById('puzzleModalTitle').textContent = 'Add New Puzzle';
     document.getElementById('puzzleName').value = '';
     
@@ -731,6 +713,11 @@ function showAddPuzzleModal() {
     
     document.getElementById('puzzleLocation').value = '';
     document.getElementById('puzzlePurchasedFrom').value = '';
+    document.getElementById('puzzleArtist').value = '';
+    document.getElementById('puzzleSize').value = '';
+    document.getElementById('puzzleCutStyle').value = '';
+    document.getElementById('puzzleModalMissingCount').value = '';
+    document.getElementById('puzzleModalMissingCountWrap').style.display = 'none';
     document.getElementById('puzzleModalNotes').value = '';
     document.getElementById('puzzleModalCondition').value = '';
     document.getElementById('puzzleModalPassesPickup').checked = false;
@@ -742,6 +729,7 @@ function showAddPuzzleModal() {
     
     // Reset image upload
     document.getElementById('puzzleModalImage').value = '';
+    document.getElementById('initialLogSection').style.display = '';
     
     // Reset initial log fields
     document.getElementById('addInitialLog').checked = false;
@@ -763,7 +751,12 @@ function editPuzzle() {
     if (!puzzle) return;
 
     editingPuzzleId = currentPuzzleId;
+    convertingWishlistId = null;
     document.getElementById('puzzleModalTitle').textContent = 'Edit Puzzle';
+    ['puzzleBrandCustom', 'puzzleThemeCustom', 'puzzleSeriesCustom'].forEach(id => {
+        document.getElementById(id).value = '';
+        document.getElementById(id).style.display = 'none';
+    });
     document.getElementById('puzzleName').value = puzzle.name;
     
     // Handle brand dropdown
@@ -800,6 +793,11 @@ function editPuzzle() {
     
     document.getElementById('puzzleLocation').value = puzzle.location || '';
     document.getElementById('puzzlePurchasedFrom').value = puzzle.purchasedFrom || '';
+    document.getElementById('puzzleArtist').value = puzzle.artist || '';
+    document.getElementById('puzzleSize').value = puzzle.size || '';
+    setSelectValue('puzzleCutStyle', puzzle.cutStyle || '');
+    document.getElementById('puzzleModalMissingCount').value = puzzle.missingPieceCount || '';
+    document.getElementById('puzzleModalMissingCountWrap').style.display = puzzle.missingPieces ? 'flex' : 'none';
     document.getElementById('puzzleModalNotes').value = puzzle.notes || '';
     document.getElementById('puzzleModalCondition').value = puzzle.condition || '';
     document.getElementById('puzzleModalPassesPickup').checked = puzzle.passesPickup || false;
@@ -808,149 +806,139 @@ function editPuzzle() {
     document.getElementById('puzzleModalDonated').checked = puzzle.donated || false;
     currentRating = puzzle.rating || 0;
     updateModalRatingDisplay();
+
+    // Photos chosen here are added to the puzzle; the initial log only applies to new puzzles
+    document.getElementById('puzzleModalImage').value = '';
+    document.getElementById('initialLogSection').style.display = 'none';
+    document.getElementById('addInitialLog').checked = false;
     showModal('puzzleModal');
+}
+
+// Upload image files to a puzzle. Throws with the server's message on failure.
+async function uploadImages(puzzleId, files) {
+    const formData = new FormData();
+    for (const file of files) formData.append("images", file);
+    const response = await fetch(`/api/puzzles/${puzzleId}/images`, { method: "POST", body: formData });
+    if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || `${response.status} ${response.statusText}`);
+    }
+    return response.json();
+}
+
+function readManagedSelect(selectId, customId, addFn) {
+    let value = document.getElementById(selectId).value;
+    if (value === "__new__") {
+        value = document.getElementById(customId).value.trim();
+        if (value) addFn(value);
+    }
+    return value || "";
 }
 
 // Save puzzle
 async function savePuzzle(event) {
     event.preventDefault();
 
-    const btn = document.getElementById('savePuzzleBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="loading"></span> Saving...';
+    const isEdit = Boolean(editingPuzzleId);
+    const wasConversion = !isEdit && Boolean(convertingWishlistId);
+    const addLog = !isEdit && document.getElementById("addInitialLog").checked;
+    if (addLog && !document.getElementById("initialLogDate").value) {
+        showAlert("Please enter a completion date for the initial log", "error");
+        return;
+    }
 
-    // Get brand value
-    let brandValue = document.getElementById('puzzleBrand').value;
-    if (brandValue === '__new__') {
-        brandValue = document.getElementById('puzzleBrandCustom').value.trim();
-        if (brandValue) {
-            addBrand(brandValue);
-            updateBrandDropdowns();
-        } else {
-            brandValue = '';
-        }
-    }
-    
-    // Get theme value
-    let themeValue = document.getElementById('puzzleTheme').value;
-    if (themeValue === '__new__') {
-        themeValue = document.getElementById('puzzleThemeCustom').value.trim();
-        if (themeValue) {
-            addTheme(themeValue);
-            updateThemeDropdowns();
-        } else {
-            themeValue = '';
-        }
-    }
-    
-    // Get series value
-    let seriesValue = document.getElementById('puzzleSeries').value;
-    if (seriesValue === '__new__') {
-        seriesValue = document.getElementById('puzzleSeriesCustom').value.trim();
-        if (seriesValue) {
-            addSeries(seriesValue);
-            updateSeriesDropdowns();
-        } else {
-            seriesValue = '';
-        }
-    }
+    const btn = document.getElementById("savePuzzleBtn");
+    btn.disabled = true;
+    btn.innerHTML = "<span class=\"loading\"></span> Saving...";
 
     const puzzleData = {
-        name: document.getElementById('puzzleName').value,
-        brand: brandValue || '',
-        pieces: parseInt(document.getElementById('puzzlePieces').value),
-        theme: themeValue || '',
-        series: seriesValue || '',
-        location: document.getElementById('puzzleLocation').value || '',
-        purchasedFrom: document.getElementById('puzzlePurchasedFrom').value || '',
+        name: document.getElementById("puzzleName").value.trim(),
+        brand: readManagedSelect("puzzleBrand", "puzzleBrandCustom", addBrand),
+        pieces: parseInt(document.getElementById("puzzlePieces").value, 10),
+        theme: readManagedSelect("puzzleTheme", "puzzleThemeCustom", addTheme),
+        series: readManagedSelect("puzzleSeries", "puzzleSeriesCustom", addSeries),
+        location: document.getElementById("puzzleLocation").value,
+        purchasedFrom: document.getElementById("puzzlePurchasedFrom").value,
+        artist: document.getElementById("puzzleArtist").value,
+        size: document.getElementById("puzzleSize").value,
+        cutStyle: document.getElementById("puzzleCutStyle").value,
+        missingPieceCount: document.getElementById("puzzleModalMissingPieces").checked
+            ? parseInt(document.getElementById("puzzleModalMissingCount").value, 10) || 0
+            : 0,
         rating: currentRating,
-        notes: document.getElementById('puzzleModalNotes').value || '',
-        condition: document.getElementById('puzzleModalCondition').value || '',
-        passesPickup: document.getElementById('puzzleModalPassesPickup').checked,
-        missingPieces: document.getElementById('puzzleModalMissingPieces').checked,
-        puzzleDust: document.getElementById('puzzleModalDust').value || '',
-        donated: document.getElementById('puzzleModalDonated').checked
+        notes: document.getElementById("puzzleModalNotes").value,
+        condition: document.getElementById("puzzleModalCondition").value,
+        passesPickup: document.getElementById("puzzleModalPassesPickup").checked,
+        missingPieces: document.getElementById("puzzleModalMissingPieces").checked,
+        puzzleDust: document.getElementById("puzzleModalDust").value,
+        donated: document.getElementById("puzzleModalDonated").checked
     };
-
-
+    const imageFiles = Array.from(document.getElementById("puzzleModalImage").files || []);
 
     try {
-        let savedPuzzle;
-        
-        if (editingPuzzleId) {
-            savedPuzzle = await apiRequest(`/api/puzzles/${editingPuzzleId}`, {
-                method: 'PUT',
-                body: JSON.stringify(puzzleData)
-            });
-            showAlert('Puzzle updated successfully!');
-            currentPuzzleId = editingPuzzleId;
+        let puzzleId;
+        if (isEdit) {
+            await apiRequest(`/api/puzzles/${editingPuzzleId}`, { method: "PUT", body: JSON.stringify(puzzleData) });
+            puzzleId = editingPuzzleId;
         } else {
-            savedPuzzle = await apiRequest('/api/puzzles', {
-                method: 'POST',
-                body: JSON.stringify(puzzleData)
-            });
-            currentPuzzleId = savedPuzzle.id;
-            
-            // Handle multiple image uploads if provided
-            const imageFiles = document.getElementById('puzzleModalImage').files;
-            if (imageFiles && imageFiles.length > 0) {
-                const formData = new FormData();
-                
-                // Append all selected images
-                for (let i = 0; i < imageFiles.length; i++) {
-                    formData.append('images', imageFiles[i]);
-                }
-                
-                const imageResponse = await fetch(`/api/puzzles/${savedPuzzle.id}/images`, {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                if (!imageResponse.ok) {
-                    console.error('Failed to upload images');
-                }
+            const created = await apiRequest("/api/puzzles", { method: "POST", body: JSON.stringify(puzzleData) });
+            puzzleId = created.id;
+        }
+        currentPuzzleId = puzzleId;
+
+        // The puzzle is saved at this point. Problems with photos or the initial
+        // log are reported, but the modal still closes so saving again cannot
+        // create a duplicate puzzle.
+        const problems = [];
+        if (imageFiles.length) {
+            try {
+                await uploadImages(puzzleId, imageFiles);
+            } catch (error) {
+                problems.push(`Photos were not saved: ${error.message}`);
             }
-            
-            // Handle initial log if checkbox is checked
-            const addLog = document.getElementById('addInitialLog').checked;
-            if (addLog) {
-                const hours = parseInt(document.getElementById('initialLogHours').value) || 0;
-                const minutes = parseInt(document.getElementById('initialLogMinutes').value) || 0;
-                const seconds = parseInt(document.getElementById('initialLogSeconds').value) || 0;
-                const totalHours = timeToHours(hours, minutes, seconds);
-                
-                const logData = {
-                    date: document.getElementById('initialLogDate').value,
-                    time: totalHours,
-                    rating: initialLogRating,
-                    notes: document.getElementById('initialLogNotes').value
-                };
-                
-                
-                const logResponse = await apiRequest(`/api/puzzles/${savedPuzzle.id}/logs`, {
-                    method: 'POST',
-                    body: JSON.stringify(logData)
-                });
-                
+        }
+        if (!isEdit && convertingWishlistId) {
+            try {
+                await apiRequest(`/api/wishlist/${convertingWishlistId}`, { method: "DELETE" });
+                await loadWishlist();
+            } catch (error) {
+                problems.push(`It is still on the wishlist (${error.message}).`);
             }
-            
-            showAlert('Puzzle created successfully!');
+            convertingWishlistId = null;
+        }
+        if (addLog) {
+            const logData = {
+                date: document.getElementById("initialLogDate").value,
+                time: timeToHours(
+                    parseInt(document.getElementById("initialLogHours").value, 10) || 0,
+                    parseInt(document.getElementById("initialLogMinutes").value, 10) || 0,
+                    parseInt(document.getElementById("initialLogSeconds").value, 10) || 0
+                ),
+                rating: initialLogRating,
+                notes: document.getElementById("initialLogNotes").value
+            };
+            try {
+                await apiRequest(`/api/puzzles/${puzzleId}/logs`, { method: "POST", body: JSON.stringify(logData) });
+            } catch (error) {
+                problems.push(`The completion log was not saved: ${error.message}`);
+            }
         }
 
-        // Reload puzzles to get fresh data including images and logs
         await loadPuzzles();
-        closeModal('puzzleModal');
+        closeModal("puzzleModal");
+        await showPuzzleDetail(puzzleId);
 
-        if (currentPuzzleId) {
-            showPuzzleDetail(currentPuzzleId);
+        if (problems.length) {
+            showAlert(`Puzzle saved, but: ${problems.join(" ")} You can add them from the puzzle page.`, "error");
         } else {
-            renderDashboard();
+            showAlert(isEdit ? "Puzzle updated successfully!" : (wasConversion ? "Moved from wishlist to your collection!" : "Puzzle created successfully!"));
         }
     } catch (error) {
-        console.error('Failed to save puzzle:', error);
+        // The puzzle itself was not saved; leave the modal open so nothing typed is lost
+        console.error("Failed to save puzzle:", error);
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Save Puzzle';
+        btn.textContent = "Save Puzzle";
     }
 }
 
@@ -973,11 +961,93 @@ async function deletePuzzle() {
     }
 }
 
-// Render puzzle list
+// ---------------------------------------------------------------------------
+// Puzzle list: search, filter and sort
+// ---------------------------------------------------------------------------
+
+const lastCompleted = p => (p.logs || []).reduce((max, l) => (l.date > max ? l.date : max), "");
+
+const PUZZLE_SORTS = {
+    newest: (a, b) => b.id - a.id,
+    oldest: (a, b) => a.id - b.id,
+    name: (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }),
+    piecesAsc: (a, b) => (a.pieces || 0) - (b.pieces || 0),
+    piecesDesc: (a, b) => (b.pieces || 0) - (a.pieces || 0),
+    rating: (a, b) => (b.rating || 0) - (a.rating || 0),
+    quality: (a, b) => ((b.quality && b.quality.qualityScore) || -1) - ((a.quality && a.quality.qualityScore) || -1),
+    lastDone: (a, b) => lastCompleted(b).localeCompare(lastCompleted(a)),
+    timesDone: (a, b) => (b.logs || []).length - (a.logs || []).length
+};
+
+const PUZZLE_FILTERS = {
+    all: () => true,
+    notDone: p => !(p.logs || []).length,
+    done: p => (p.logs || []).length > 0,
+    kept: p => !p.donated,
+    donated: p => Boolean(p.donated),
+    missing: p => Boolean(p.missingPieces),
+    pickup: p => Boolean(p.passesPickup)
+};
+
+// Remember sort/filter choices in this browser (storage can be unavailable)
+function loadListControls() {
+    try {
+        const saved = JSON.parse(localStorage.getItem("listControls") || "{}");
+        if (saved.sort && PUZZLE_SORTS[saved.sort]) document.getElementById("sortSelect").value = saved.sort;
+        if (saved.filter && PUZZLE_FILTERS[saved.filter]) document.getElementById("filterSelect").value = saved.filter;
+        if (saved.brand) document.getElementById("brandFilterSelect").dataset.pending = saved.brand;
+    } catch (e) { /* ignore */ }
+}
+
+function onListControlsChange() {
+    try {
+        localStorage.setItem("listControls", JSON.stringify({
+            sort: document.getElementById("sortSelect").value,
+            filter: document.getElementById("filterSelect").value,
+            brand: document.getElementById("brandFilterSelect").value
+        }));
+    } catch (e) { /* ignore */ }
+    renderPuzzleList();
+}
+
+// Brand filter lists the brands actually used in the collection
+function refreshBrandFilterOptions() {
+    const select = document.getElementById("brandFilterSelect");
+    const wanted = select.dataset.pending || select.value;
+    delete select.dataset.pending;
+    const brands = [...new Set(puzzles.map(p => p.brand).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    select.innerHTML = `<option value="">All brands</option>` +
+        brands.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join("");
+    select.value = brands.includes(wanted) ? wanted : "";
+}
+
+function getVisiblePuzzles() {
+    const query = document.getElementById("searchBox").value.trim().toLowerCase();
+    const filter = PUZZLE_FILTERS[document.getElementById("filterSelect").value] || PUZZLE_FILTERS.all;
+    const sort = PUZZLE_SORTS[document.getElementById("sortSelect").value] || PUZZLE_SORTS.newest;
+    const brand = document.getElementById("brandFilterSelect").value;
+
+    return puzzles
+        .filter(p => !query || [p.name, p.brand, p.theme, p.series, p.artist].some(v => v && String(v).toLowerCase().includes(query)))
+        .filter(p => !brand || p.brand === brand)
+        .filter(filter)
+        .sort(sort);
+}
+
+function puzzleThumbnail(puzzle, className) {
+    const images = puzzle.images || [];
+    if (!images.length) return `<div class="${className}">🧩</div>`;
+    const index = Math.min(puzzle.thumbnailIndex || 0, images.length - 1);
+    return `<img src="${escapeHtml(images[index])}" alt="${escapeHtml(puzzle.name)}" class="${className}" loading="lazy">`;
+}
+
 function renderPuzzleList() {
-    const listContainer = document.getElementById('puzzleList');
-    
+    const listContainer = document.getElementById("puzzleList");
+    const countEl = document.getElementById("listCount");
+    refreshBrandFilterOptions();
+
     if (!puzzles || puzzles.length === 0) {
+        countEl.textContent = "";
         listContainer.innerHTML = `
             <div class="empty-state">
                 <h3>No puzzles yet</h3>
@@ -987,22 +1057,30 @@ function renderPuzzleList() {
         return;
     }
 
-    listContainer.innerHTML = puzzles.map(puzzle => {
-        const thumbnailIndex = Math.min(puzzle.thumbnailIndex || 0, (puzzle.images && puzzle.images.length > 0 ? puzzle.images.length - 1 : 0));
-        const thumbnail = puzzle.images && puzzle.images.length > 0
-            ? `<img src="${escapeHtml(puzzle.images[thumbnailIndex])}" alt="${escapeHtml(puzzle.name)}" class="puzzle-item-thumbnail">`
-            : `<div class="puzzle-item-thumbnail">🧩</div>`;
+    const list = getVisiblePuzzles();
+    countEl.textContent = list.length === puzzles.length
+        ? `${puzzles.length} puzzle${puzzles.length === 1 ? "" : "s"}`
+        : `Showing ${list.length} of ${puzzles.length}`;
 
-        return `
-            <div class="puzzle-item ${puzzle.id === currentPuzzleId ? 'active' : ''}" onclick="showPuzzleDetail(${puzzle.id})">
-                ${thumbnail}
-                <div class="puzzle-item-info">
-                    <h3>${escapeHtml(puzzle.name)}</h3>
-                    <p>${escapeHtml(String(puzzle.pieces))} pieces${puzzle.brand ? ' • ' + escapeHtml(puzzle.brand) : ''}</p>
-                </div>
+    if (list.length === 0) {
+        listContainer.innerHTML = `
+            <div class="empty-state">
+                <h3>No matches found</h3>
+                <p>Try a different search or filter</p>
             </div>
         `;
-    }).join('');
+        return;
+    }
+
+    listContainer.innerHTML = list.map(puzzle => `
+        <div class="puzzle-item ${puzzle.id === currentPuzzleId ? "active" : ""}" onclick="showPuzzleDetail(${puzzle.id})">
+            ${puzzleThumbnail(puzzle, "puzzle-item-thumbnail")}
+            <div class="puzzle-item-info">
+                <h3>${escapeHtml(puzzle.name)}</h3>
+                <p>${escapeHtml(String(puzzle.pieces))} pieces${puzzle.brand ? " • " + escapeHtml(puzzle.brand) : ""}</p>
+            </div>
+        </div>
+    `).join("");
 }
 
 // Show puzzle detail
@@ -1049,7 +1127,8 @@ function renderOverview(puzzle) {
     const donated = puzzle.donated ? '<span style="color: #28a745; font-weight: 600;">✓ Donated</span>' : '<span style="color: #666;">Not donated</span>';
     const condition = puzzle.condition ? puzzle.condition.charAt(0).toUpperCase() + puzzle.condition.slice(1) : 'Not specified';
     const passesPickup = puzzle.passesPickup ? '<span style="color: #28a745; font-weight: 600;">✓ Yes</span>' : '<span style="color: #666;">Not tested</span>';
-    const missingPieces = puzzle.missingPieces ? '<span style="color: #dc3545; font-weight: 600;">⚠ Yes</span>' : '<span style="color: #28a745;">✓ Complete</span>';
+    const missingCountText = puzzle.missingPieceCount > 0 ? ` (${puzzle.missingPieceCount} missing)` : '';
+    const missingPieces = puzzle.missingPieces ? `<span style="color: #dc3545; font-weight: 600;">⚠ Yes${missingCountText}</span>` : '<span style="color: #28a745;">✓ Complete</span>';
     const qualityScore = puzzle.quality?.qualityScore || 'Not rated';
     const qualityDisplay = typeof qualityScore === 'number' ? 
         `<span style="font-size: 24px; font-weight: bold; color: var(--primary-color);">${qualityScore}/100</span>` : 
@@ -1061,10 +1140,13 @@ function renderOverview(puzzle) {
             <p><strong>Pieces:</strong> ${escapeHtml(String(puzzle.pieces))}</p>
             <p><strong>Theme:</strong> ${puzzle.theme ? escapeHtml(puzzle.theme) : 'Not specified'}</p>
             ${puzzle.series ? `<p><strong>Series/Set:</strong> ${escapeHtml(puzzle.series)}</p>` : ''}
+            ${puzzle.artist ? `<p><strong>Artist:</strong> ${escapeHtml(puzzle.artist)}</p>` : ''}
+            ${puzzle.size ? `<p><strong>Finished Size:</strong> ${escapeHtml(puzzle.size)}</p>` : ''}
+            ${puzzle.cutStyle ? `<p><strong>Cut Style:</strong> ${escapeHtml(puzzle.cutStyle)}</p>` : ''}
             <p><strong>Storage Location:</strong> ${puzzle.location ? escapeHtml(puzzle.location) : 'Not specified'}</p>
             <p><strong>Source:</strong> ${puzzle.purchasedFrom ? escapeHtml(puzzle.purchasedFrom) : 'Not specified'}</p>
             <p><strong>Overall Rating:</strong> <span style="color: #ffc107; font-size: 24px;">${stars}</span></p>
-            <p><strong>Times Completed:</strong> ${puzzle.logs.length}</p>
+            <p><strong>Times Completed:</strong> ${(puzzle.logs || []).length}</p>
             <p><strong>Condition:</strong> ${escapeHtml(condition)}</p>
             <p><strong>Passes Pickup Test:</strong> ${passesPickup}</p>
             <p><strong>Missing Pieces:</strong> ${missingPieces}</p>
@@ -1077,34 +1159,21 @@ function renderOverview(puzzle) {
 
 // Handle image upload
 async function handleImageUpload(event) {
-    const files = event.target.files;
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
     if (files.length === 0) return;
 
-    const formData = new FormData();
-    for (let file of files) {
-        formData.append('images', file);
-    }
-
     try {
-        const response = await fetch(`/api/puzzles/${currentPuzzleId}/images`, {
-            method: 'POST',
-            body: formData
-        });
-        if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            showAlert('Failed to upload images: ' + (err.error || response.statusText), 'error');
-            return;
-        }
-
+        await uploadImages(currentPuzzleId, files);
         showAlert(`${files.length} image(s) uploaded successfully!`);
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderImages(puzzle);
+        renderStats(puzzle);
+        renderPuzzleList();
     } catch (error) {
-        console.error('Failed to upload images:', error);
-        showAlert('Failed to upload images', 'error');
+        console.error("Failed to upload images:", error);
+        showAlert(`Failed to upload images: ${error.message}`, "error");
     }
-
-    event.target.value = '';
 }
 
 // Render images
@@ -1146,8 +1215,10 @@ async function deleteImage(index) {
         });
 
         showAlert('Image deleted successfully!');
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderImages(puzzle);
+        renderStats(puzzle);
+        renderPuzzleList();
     } catch (error) {
         console.error('Failed to delete image:', error);
     }
@@ -1157,7 +1228,7 @@ async function deleteImage(index) {
 function showAddLogModal() {
     editingLogId = null;
     document.getElementById('logModalTitle').textContent = 'Add Completion Log';
-    document.getElementById('logDate').value = new Date().toISOString().split('T')[0];
+    document.getElementById('logDate').value = todayLocal();
     document.getElementById('logHours').value = '0';
     document.getElementById('logMinutes').value = '0';
     document.getElementById('logSeconds').value = '0';
@@ -1226,7 +1297,7 @@ async function saveLog(event) {
             showAlert('Completion log added successfully!');
         }
 
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderLogs(puzzle);
         renderStats(puzzle);
         closeModal('logModal');
@@ -1244,15 +1315,15 @@ function renderLogs(puzzle) {
         return;
     }
 
-    const sortedLogs = [...puzzle.logs].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const sortedLogs = [...puzzle.logs].sort((a, b) => b.date.localeCompare(a.date));
 
     logList.innerHTML = sortedLogs.map(log => {
-        const timeFormatted = formatTime(log.time);
+        const timeFormatted = log.time > 0 ? formatTime(log.time) : "Not timed";
         
         return `
             <div class="log-item">
                 <div class="log-item-header">
-                    <div class="log-item-date">${new Date(log.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+                    <div class="log-item-date">${parseLocalDate(log.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
                     <div class="log-item-time">${timeFormatted}</div>
                 </div>
                 ${log.notes ? `<p style="color: #666; margin-top: 10px;">${escapeHtml(log.notes)}</p>` : ''}
@@ -1275,7 +1346,7 @@ async function deleteLog(logId) {
         });
 
         showAlert('Log deleted successfully!');
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderLogs(puzzle);
         renderStats(puzzle);
     } catch (error) {
@@ -1294,6 +1365,7 @@ async function updatePuzzleNotes() {
         });
 
         showAlert('Notes updated successfully!');
+        renderOverview(await refreshPuzzle());
     } catch (error) {
         console.error('Failed to update notes:', error);
     }
@@ -1312,11 +1384,7 @@ async function updatePuzzleDust() {
         showAlert('Puzzle dust level updated!');
         
         // Refresh puzzle data
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
+        const puzzle = await refreshPuzzle();
         renderOverview(puzzle);
     } catch (error) {
         console.error('Failed to update puzzle dust:', error);
@@ -1336,11 +1404,7 @@ async function updateDonationStatus() {
         showAlert(donated ? 'Marked as donated!' : 'Donation status removed');
         
         // Refresh puzzle data
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
+        const puzzle = await refreshPuzzle();
         renderOverview(puzzle);
         renderStats(puzzle);
     } catch (error) {
@@ -1353,6 +1417,8 @@ function renderNotes(puzzle) {
     document.getElementById('puzzleCondition').value = puzzle.condition || '';
     document.getElementById('puzzlePassesPickup').checked = puzzle.passesPickup || false;
     document.getElementById('puzzleMissingPieces').checked = puzzle.missingPieces || false;
+    document.getElementById('puzzleMissingCount').value = puzzle.missingPieceCount || '';
+    document.getElementById('puzzleMissingCountWrap').style.display = puzzle.missingPieces ? 'flex' : 'none';
     document.getElementById('puzzleNotes').value = puzzle.notes || '';
     document.getElementById('puzzleDust').value = puzzle.puzzleDust || '';
     document.getElementById('puzzleDonated').checked = puzzle.donated || false;
@@ -1383,7 +1449,7 @@ async function saveCustomField(event) {
         });
 
         showAlert('Custom field added successfully!');
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderCustomFields(puzzle);
         closeModal('customFieldModal');
     } catch (error) {
@@ -1418,7 +1484,7 @@ async function deleteCustomField(fieldId) {
         });
 
         showAlert('Custom field deleted successfully!');
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderCustomFields(puzzle);
     } catch (error) {
         console.error('Failed to delete custom field:', error);
@@ -1428,56 +1494,32 @@ async function deleteCustomField(fieldId) {
 // Render statistics
 function renderStats(puzzle) {
     const logs = puzzle.logs || [];
-    const totalCompletions = logs.length;
-    const totalTime = logs.reduce((sum, log) => sum + log.time, 0);
-    const avgTime = totalCompletions > 0 ? (totalTime / totalCompletions) : 0;
-    const fastestTime = totalCompletions > 0 ? Math.min(...logs.map(l => l.time)) : 0;
-    const avgRating = logs.length > 0 ? (logs.reduce((sum, log) => sum + (log.rating || 0), 0) / logs.length).toFixed(1) : 0;
-    const donationStatus = puzzle.donated ? 'Yes' : 'No';
+    const timed = logs.filter(l => l.time > 0);
+    const rated = logs.filter(l => l.rating > 0);
+    const totalTime = timed.reduce((sum, log) => sum + log.time, 0);
+    const avgTime = timed.length ? totalTime / timed.length : 0;
+    const fastestTime = timed.length ? Math.min(...timed.map(l => l.time)) : 0;
+    const avgRating = rated.length ? (rated.reduce((sum, l) => sum + l.rating, 0) / rated.length).toFixed(1) : null;
 
-    document.getElementById('statsGrid').innerHTML = `
-        <div class="stat-card">
-            <h3>${totalCompletions}</h3>
-            <p>Times Completed</p>
-        </div>
-        <div class="stat-card">
-            <h3>${formatTime(totalTime)}</h3>
-            <p>Total Time</p>
-        </div>
-        <div class="stat-card">
-            <h3>${avgTime > 0 ? formatTime(avgTime) : 'N/A'}</h3>
-            <p>Average Time</p>
-        </div>
-        <div class="stat-card">
-            <h3>${fastestTime > 0 ? formatTime(fastestTime) : 'N/A'}</h3>
-            <p>Fastest Time</p>
-        </div>
-        <div class="stat-card">
-            <h3>${avgRating || 'N/A'}</h3>
-            <p>Average Rating</p>
-        </div>
-        <div class="stat-card">
-            <h3>${puzzle.images.length}</h3>
-            <p>Images</p>
-        </div>
-        <div class="stat-card">
-            <h3>${donationStatus}</h3>
-            <p>Donated</p>
-        </div>
-        <div class="stat-card">
-            <h3>${puzzle.puzzleDust || 'N/A'}</h3>
-            <p>Puzzle Dust</p>
-        </div>
+    document.getElementById("statsGrid").innerHTML = `
+        <div class="stat-card"><h3>${logs.length}</h3><p>Times Completed</p></div>
+        <div class="stat-card"><h3>${timed.length ? formatTime(totalTime) : "N/A"}</h3><p>Total Time</p></div>
+        <div class="stat-card"><h3>${avgTime ? formatTime(avgTime) : "N/A"}</h3><p>Average Time</p></div>
+        <div class="stat-card"><h3>${fastestTime ? formatTime(fastestTime) : "N/A"}</h3><p>Fastest Time</p></div>
+        <div class="stat-card"><h3>${avgRating || "N/A"}</h3><p>Average Rating</p></div>
+        <div class="stat-card"><h3>${(puzzle.images || []).length}</h3><p>Images</p></div>
+        <div class="stat-card"><h3>${puzzle.donated ? "Yes" : "No"}</h3><p>Donated</p></div>
+        <div class="stat-card"><h3>${puzzle.puzzleDust ? escapeHtml(puzzle.puzzleDust) : "N/A"}</h3><p>Puzzle Dust</p></div>
     `;
 }
 
 // Switch tab
 function switchTab(tabName) {
-    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-
-    event.target.classList.add('active');
-    document.getElementById(tabName + 'Tab').classList.add('active');
+    document.querySelectorAll(".tab").forEach(tab => {
+        tab.classList.toggle("active", tab.getAttribute("onclick") === `switchTab('${tabName}')`);
+    });
+    document.querySelectorAll(".tab-content").forEach(content => content.classList.remove("active"));
+    document.getElementById(tabName + "Tab").classList.add("active");
 }
 
 // Set modal rating
@@ -1506,43 +1548,11 @@ function updateLogRatingDisplay() {
 
 // Search puzzles
 function searchPuzzles() {
-    const query = document.getElementById('searchBox').value.toLowerCase();
-    const filtered = puzzles.filter(p => 
-        p.name.toLowerCase().includes(query) ||
-        (p.brand && p.brand.toLowerCase().includes(query)) ||
-        (p.theme && p.theme.toLowerCase().includes(query))
-    );
-
-    const listContainer = document.getElementById('puzzleList');
-    
-    if (filtered.length === 0) {
-        listContainer.innerHTML = `
-            <div class="empty-state">
-                <h3>No matches found</h3>
-                <p>Try a different search term</p>
-            </div>
-        `;
-        return;
-    }
-
-    listContainer.innerHTML = filtered.map(puzzle => {
-        const thumbnail = puzzle.images && puzzle.images.length > 0
-            ? `<img src="${escapeHtml(puzzle.images[0])}" alt="${escapeHtml(puzzle.name)}" class="puzzle-item-thumbnail">`
-            : `<div class="puzzle-item-thumbnail">🧩</div>`;
-
-        return `
-            <div class="puzzle-item ${puzzle.id === currentPuzzleId ? 'active' : ''}" onclick="showPuzzleDetail(${puzzle.id})">
-                ${thumbnail}
-                <div class="puzzle-item-info">
-                    <h3>${escapeHtml(puzzle.name)}</h3>
-                    <p>${escapeHtml(String(puzzle.pieces))} pieces${puzzle.brand ? ' • ' + escapeHtml(puzzle.brand) : ''}</p>
-                </div>
-            </div>
-        `;
-    }).join('');
+    renderPuzzleList();
 }
 
 // Initialize app
+loadListControls();
 
 Promise.all([
     loadTheme().catch(err => console.error('Theme load error:', err)),
@@ -1569,7 +1579,7 @@ function toggleInitialLogFields() {
     fields.style.display = checkbox.checked ? 'block' : 'none';
     
     if (checkbox.checked) {
-        document.getElementById('initialLogDate').value = new Date().toISOString().split('T')[0];
+        document.getElementById('initialLogDate').value = todayLocal();
     }
 }
 
@@ -1597,11 +1607,7 @@ async function updatePuzzleCondition() {
 
         showAlert('Condition updated!');
         
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
+        const puzzle = await refreshPuzzle();
         renderOverview(puzzle);
     } catch (error) {
         console.error('Failed to update condition:', error);
@@ -1620,11 +1626,7 @@ async function updatePassesPickup() {
 
         showAlert(passesPickup ? 'Marked as passing pickup test!' : 'Pickup test status removed');
         
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
+        const puzzle = await refreshPuzzle();
         renderOverview(puzzle);
     } catch (error) {
         console.error('Failed to update passes pickup:', error);
@@ -1730,8 +1732,9 @@ async function saveEditedImage() {
         closeImageEditor();
         
         // Refresh images
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
+        const puzzle = await refreshPuzzle();
         renderImages(puzzle);
+        renderPuzzleList();
     } catch (error) {
         console.error('Failed to save edited image:', error);
         showAlert('Failed to save edited image', 'error');
@@ -1748,11 +1751,7 @@ async function setThumbnail(imageIndex) {
         
         showAlert('Thumbnail updated!');
         
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
+        const puzzle = await refreshPuzzle();
         renderImages(puzzle);
         renderPuzzleList();
     } catch (error) {
@@ -1827,41 +1826,30 @@ async function updateQualityScore() {
                 method: 'PUT',
                 body: JSON.stringify(qualityData)
             });
+            renderOverview(await refreshPuzzle());
         } catch (error) {
             console.error('Failed to save quality data:', error);
         }
     }
 }
 
-// Load quality data into form
+// Load quality data into form. Always resets first so values from the
+// previously viewed puzzle never carry over and get saved to this one.
 function loadQualityData(puzzle) {
-    if (!puzzle.quality) return;
-    
-    const setRadio = (name, value) => {
-        const radio = document.querySelector(`input[name="${name}"][value="${value}"]`);
+    const q = puzzle.quality || {};
+    document.querySelectorAll("#qualitySection input[type=radio]").forEach(r => { r.checked = false; });
+    ["pieceFit", "cutQuality", "thickness", "finish", "shapeVariety", "falseFits", "colorQuality", "alignment"].forEach(name => {
+        if (!q[name]) return;
+        const radio = document.querySelector(`input[name="${name}"][value="${q[name]}"]`);
         if (radio) radio.checked = true;
-    };
-    
-    setRadio('pieceFit', puzzle.quality.pieceFit || 0);
-    setRadio('cutQuality', puzzle.quality.cutQuality || 0);
-    setRadio('thickness', puzzle.quality.thickness || 0);
-    setRadio('finish', puzzle.quality.finish || 0);
-    setRadio('shapeVariety', puzzle.quality.shapeVariety || 0);
-    setRadio('falseFits', puzzle.quality.falseFits || 0);
-    setRadio('colorQuality', puzzle.quality.colorQuality || 0);
-    setRadio('alignment', puzzle.quality.alignment || 0);
-    
-    if (puzzle.quality.imageSharpness) {
-        document.getElementById('imageSharpness').value = puzzle.quality.imageSharpness;
-        document.getElementById('imageSharpnessValue').textContent = puzzle.quality.imageSharpness;
-    }
-    
-    if (puzzle.quality.packaging) {
-        document.getElementById('packaging').value = puzzle.quality.packaging;
-        document.getElementById('packagingValue').textContent = puzzle.quality.packaging;
-    }
-    
-    document.getElementById('qualityScoreDisplay').textContent = puzzle.quality.qualityScore || 0;
+    });
+    const sharpness = q.imageSharpness || 3;
+    const packaging = q.packaging || 3;
+    document.getElementById("imageSharpness").value = sharpness;
+    document.getElementById("imageSharpnessValue").textContent = sharpness;
+    document.getElementById("packaging").value = packaging;
+    document.getElementById("packagingValue").textContent = packaging;
+    document.getElementById("qualityScoreDisplay").textContent = q.qualityScore || 0;
 }
 
 // Show About modal
@@ -1872,114 +1860,20 @@ function showAbout() {
 // Update missing pieces
 async function updateMissingPieces() {
     const missingPieces = document.getElementById('puzzleMissingPieces').checked;
+    const missingPieceCount = parseInt(document.getElementById('puzzleMissingCount').value, 10) || 0;
 
     try {
         await apiRequest(`/api/puzzles/${currentPuzzleId}/missing-pieces`, {
             method: 'PUT',
-            body: JSON.stringify({ missingPieces })
+            body: JSON.stringify({ missingPieces, missingPieceCount })
         });
 
         showAlert(missingPieces ? 'Marked as having missing pieces' : 'Missing pieces status removed');
         
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
+        const puzzle = await refreshPuzzle();
         renderOverview(puzzle);
     } catch (error) {
         console.error('Failed to update missing pieces:', error);
-    }
-}
-
-// Calculate PQI
-function calculatePQI() {
-    const fit = parseInt(document.getElementById('pqiFit').value) || 0;
-    const cut = parseInt(document.getElementById('pqiCut').value) || 0;
-    const image = parseInt(document.getElementById('pqiImage').value) || 0;
-    const thickness = parseInt(document.getElementById('pqiThickness').value) || 0;
-    const finish = parseInt(document.getElementById('pqiFinish').value) || 0;
-    const shape = parseInt(document.getElementById('pqiShape').value) || 0;
-    const falseFits = parseInt(document.getElementById('pqiFalseFits').value) || 0;
-    const color = parseInt(document.getElementById('pqiColor').value) || 0;
-    const alignment = parseInt(document.getElementById('pqiAlignment').value) || 0;
-    const packaging = parseInt(document.getElementById('pqiPackaging').value) || 0;
-    
-    const score = (
-        (fit / 5) * 20 +
-        (cut / 5) * 15 +
-        (image / 5) * 15 +
-        (thickness / 5) * 10 +
-        (finish / 5) * 10 +
-        (shape / 5) * 10 +
-        (falseFits / 5) * 10 +
-        (color / 5) * 5 +
-        (alignment / 5) * 3 +
-        (packaging / 5) * 2
-    );
-    
-    return Math.round(score);
-}
-
-// Calculate and save PQI
-async function calculateAndSavePQI() {
-    const pqiData = {
-        fit: parseInt(document.getElementById('pqiFit').value) || 0,
-        cut: parseInt(document.getElementById('pqiCut').value) || 0,
-        image: parseInt(document.getElementById('pqiImage').value) || 0,
-        thickness: parseInt(document.getElementById('pqiThickness').value) || 0,
-        finish: parseInt(document.getElementById('pqiFinish').value) || 0,
-        shape: parseInt(document.getElementById('pqiShape').value) || 0,
-        falseFits: parseInt(document.getElementById('pqiFalseFits').value) || 0,
-        color: parseInt(document.getElementById('pqiColor').value) || 0,
-        alignment: parseInt(document.getElementById('pqiAlignment').value) || 0,
-        packaging: parseInt(document.getElementById('pqiPackaging').value) || 0
-    };
-    
-    const score = calculatePQI();
-    pqiData.score = score;
-    
-    try {
-        await apiRequest(`/api/puzzles/${currentPuzzleId}/pqi`, {
-            method: 'PUT',
-            body: JSON.stringify(pqiData)
-        });
-        
-        document.getElementById('pqiScore').textContent = `${score} / 100`;
-        document.getElementById('pqiScore').style.color = score >= 75 ? '#28a745' : score >= 50 ? '#ffc107' : '#dc3545';
-        
-        showAlert(`PQI Score: ${score}/100 - Saved!`);
-        
-        const puzzle = await apiRequest(`/api/puzzles/${currentPuzzleId}`);
-        const index = puzzles.findIndex(p => p.id === currentPuzzleId);
-        if (index !== -1) {
-            puzzles[index] = puzzle;
-        }
-        renderOverview(puzzle);
-    } catch (error) {
-        console.error('Failed to save PQI:', error);
-    }
-}
-
-// Load PQI data
-function loadPQIData(puzzle) {
-    if (puzzle.pqi) {
-        document.getElementById('pqiFit').value = puzzle.pqi.fit || '';
-        document.getElementById('pqiCut').value = puzzle.pqi.cut || '';
-        document.getElementById('pqiImage').value = puzzle.pqi.image || '';
-        document.getElementById('pqiThickness').value = puzzle.pqi.thickness || '';
-        document.getElementById('pqiFinish').value = puzzle.pqi.finish || '';
-        document.getElementById('pqiShape').value = puzzle.pqi.shape || '';
-        document.getElementById('pqiFalseFits').value = puzzle.pqi.falseFits || '';
-        document.getElementById('pqiColor').value = puzzle.pqi.color || '';
-        document.getElementById('pqiAlignment').value = puzzle.pqi.alignment || '';
-        document.getElementById('pqiPackaging').value = puzzle.pqi.packaging || '';
-        
-        if (puzzle.pqi.score !== undefined) {
-            const score = puzzle.pqi.score;
-            document.getElementById('pqiScore').textContent = `${score} / 100`;
-            document.getElementById('pqiScore').style.color = score >= 75 ? '#28a745' : score >= 50 ? '#ffc107' : '#dc3545';
-        }
     }
 }
 
@@ -2021,78 +1915,163 @@ function handleSeriesChange() {
     }
 }
 
-// Update series dropdowns
-function updateSeriesDropdowns() {
-    const seriesSelect = document.getElementById('puzzleSeries');
-    if (!seriesSelect) return;
-    
-    // Ensure settings.series exists
-    if (!settings.series) {
-        settings.series = [];
-    }
-    
-    const currentValue = seriesSelect.value;
-    seriesSelect.innerHTML = '<option value="">Select or type new...</option>';
-    
-    settings.series.forEach(series => {
-        const option = document.createElement('option');
-        option.value = series;
-        option.textContent = series;
-        seriesSelect.appendChild(option);
-    });
-    
-    const newOption = document.createElement('option');
-    newOption.value = '__new__';
-    newOption.textContent = '+ Add New Series/Set';
-    seriesSelect.appendChild(newOption);
-    
-    if (currentValue && settings.series.includes(currentValue)) {
-        seriesSelect.value = currentValue;
-    }
+function updateSeriesDropdowns() { fillManagedDropdown("puzzleSeries", "series", "+ Add New Series/Set"); }
+const addSeries = series => addManagedItem("series", series);
+const removeSeries = series => removeManagedItem("series", series);
+function renderSeriesList() { renderManagedList("seriesList", "series", "No series/sets added yet."); }
+
+
+// ---------------------------------------------------------------------------
+// Wishlist: "Got it" moves an item into the collection
+// ---------------------------------------------------------------------------
+
+
+// Sets a brand/theme/series dropdown, using the "new" box for values not in the list
+function setManagedSelect(selectId, customId, value) {
+    const select = document.getElementById(selectId);
+    const custom = document.getElementById(customId);
+    const inList = value && [...select.options].some(o => o.value === value && o.value !== "__new__");
+    select.value = inList ? value : (value ? "__new__" : "");
+    custom.value = inList ? "" : (value || "");
+    custom.style.display = !inList && value ? "block" : "none";
 }
 
-// Add series
-function addSeries(series) {
-    if (!settings.series) {
-        settings.series = [];
-    }
-    if (!settings.series.includes(series)) {
-        settings.series.push(series);
-        settings.series.sort();
-        saveSettings();
-        return true;
-    }
-    return false;
+function convertWishlistItem(id) {
+    const item = wishlistItems.find(w => w.id === id);
+    if (!item) return;
+
+    showAddPuzzleModal();
+    convertingWishlistId = id;
+    document.getElementById("puzzleModalTitle").textContent = "Add to Collection";
+    document.getElementById("puzzleName").value = item.name || "";
+    document.getElementById("puzzlePieces").value = parseInt(item.pieces, 10) || "";
+    setManagedSelect("puzzleBrand", "puzzleBrandCustom", item.brand || "");
+    setManagedSelect("puzzleTheme", "puzzleThemeCustom", item.theme || "");
+    document.getElementById("puzzlePurchasedFrom").value = item.whereToBuy || "";
+    document.getElementById("puzzleModalNotes").value = item.notes || "";
 }
 
-// Remove series
-function removeSeries(series) {
-    if (!settings.series) {
-        settings.series = [];
+// ---------------------------------------------------------------------------
+// Pick one for me
+// ---------------------------------------------------------------------------
+
+
+function showPickModal() {
+    document.getElementById("pickResult").innerHTML = "";
+    showModal("pickModal");
+}
+
+function pickRandomPuzzle() {
+    const min = parseInt(document.getElementById("pickMin").value, 10) || 0;
+    const max = parseInt(document.getElementById("pickMax").value, 10) || Infinity;
+    const notDone = document.getElementById("pickNotDone").checked;
+    const skipDonated = document.getElementById("pickSkipDonated").checked;
+    const skipMissing = document.getElementById("pickSkipMissing").checked;
+
+    const candidates = puzzles.filter(p =>
+        (p.pieces || 0) >= min &&
+        (p.pieces || 0) <= max &&
+        (!notDone || !(p.logs || []).length) &&
+        (!skipDonated || !p.donated) &&
+        (!skipMissing || !p.missingPieces)
+    );
+
+    const result = document.getElementById("pickResult");
+    if (candidates.length === 0) {
+        result.innerHTML = `<p style="text-align: center; color: #666;">No puzzles match those choices. Try loosening them.</p>`;
         return;
     }
-    settings.series = settings.series.filter(s => s !== series);
-    saveSettings();
-}
 
-// Render series list in settings
-function renderSeriesList() {
-    const listDiv = document.getElementById('seriesList');
-    if (!listDiv) return;
-    
-    if (!settings.series) {
-        settings.series = [];
-    }
-    
-    if (settings.series.length === 0) {
-        listDiv.innerHTML = '<p style="color: #666;">No series/sets added yet.</p>';
-        return;
-    }
-    
-    listDiv.innerHTML = settings.series.map(series => `
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #f8f9fa; border-radius: 6px; margin-bottom: 8px;">
-            <span>${series}</span>
-            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 14px;" onclick="removeSeries('${series.replace(/'/g, "\\'")}'); renderSeriesList(); updateSeriesDropdowns();">Delete</button>
+    // Avoid picking the same puzzle twice in a row when there is a choice
+    const pool = candidates.length > 1 ? candidates.filter(p => p.id !== lastPickedId) : candidates;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    lastPickedId = pick.id;
+
+    const timesDone = (pick.logs || []).length;
+    result.innerHTML = `
+        <div class="pick-card">
+            ${puzzleThumbnail(pick, "pick-placeholder")}
+            <div style="flex: 1; min-width: 0;">
+                <h3 style="margin-bottom: 4px;">${escapeHtml(pick.name)}</h3>
+                <p style="color: #666;">${escapeHtml(String(pick.pieces))} pieces${pick.brand ? " • " + escapeHtml(pick.brand) : ""}</p>
+                <p style="color: #666; font-size: 14px;">${timesDone ? `Done ${timesDone} time${timesDone === 1 ? "" : "s"}` : "Not done yet"}${pick.location ? " • " + escapeHtml(pick.location) : ""}</p>
+            </div>
         </div>
-    `).join('');
+        <p style="text-align: center; color: #888; font-size: 13px; margin: 8px 0;">Picked from ${candidates.length} matching puzzle${candidates.length === 1 ? "" : "s"}</p>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn btn-secondary" style="flex: 1;" onclick="pickRandomPuzzle()">🎲 Pick Again</button>
+            <button class="btn btn-primary" style="flex: 1;" onclick="closeModal('pickModal'); showPuzzleDetail(${pick.id})">Open Puzzle</button>
+        </div>
+    `;
+}
+
+// ---------------------------------------------------------------------------
+// CSV export
+// ---------------------------------------------------------------------------
+
+function csvCell(value) {
+    let text = value == null ? "" : String(value);
+    // Stop spreadsheet apps from treating text as a formula
+    if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCsv(filename, headers, rows) {
+    const lines = [headers, ...rows].map(row => row.map(csvCell).join(","));
+    // Byte order mark so Excel opens UTF-8 (accents, emoji) correctly
+    const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const csvTime = hours => (hours > 0 ? formatTime(hours) : "");
+const yesNo = v => (v ? "Yes" : "No");
+
+async function exportPuzzlesCsv() {
+    try {
+        const data = await apiRequest("/api/puzzles");
+        const headers = [
+            "Name", "Brand", "Pieces", "Theme", "Series/Set", "Artist", "Finished Size", "Cut Style",
+            "Storage Location", "Source", "Rating", "Condition", "Passes Pickup Test", "Missing Pieces",
+            "Missing Piece Count", "Puzzle Dust", "Donated", "Quality Score", "Times Completed",
+            "Last Completed", "Fastest Time", "Average Time", "Images", "Notes", "Date Added"
+        ];
+        const rows = data.map(p => {
+            const timed = (p.logs || []).filter(l => l.time > 0);
+            const fastest = timed.length ? Math.min(...timed.map(l => l.time)) : 0;
+            const average = timed.length ? timed.reduce((s, l) => s + l.time, 0) / timed.length : 0;
+            return [
+                p.name, p.brand, p.pieces, p.theme, p.series, p.artist, p.size, p.cutStyle,
+                p.location, p.purchasedFrom, p.rating || "", p.condition, yesNo(p.passesPickup), yesNo(p.missingPieces),
+                p.missingPieceCount || "", p.puzzleDust, yesNo(p.donated), (p.quality && p.quality.qualityScore) || "",
+                (p.logs || []).length, lastCompleted(p), csvTime(fastest), csvTime(average), (p.images || []).length,
+                p.notes, p.createdAt ? p.createdAt.slice(0, 10) : ""
+            ];
+        });
+        downloadCsv(`puzzles-${todayLocal()}.csv`, headers, rows);
+        showAlert(`Exported ${rows.length} puzzles`);
+    } catch (error) {
+        console.error("CSV export failed:", error);
+    }
+}
+
+async function exportWishlistCsv() {
+    try {
+        const data = await apiRequest("/api/wishlist");
+        const headers = ["Name", "Brand", "Pieces", "Theme", "Priority", "Price", "Where to Buy", "Link", "Notes", "Date Added"];
+        const rows = data.map(w => [
+            w.name, w.brand, w.pieces, w.theme, w.priority, w.price, w.whereToBuy, w.url, w.notes,
+            w.addedDate ? w.addedDate.slice(0, 10) : ""
+        ]);
+        downloadCsv(`wishlist-${todayLocal()}.csv`, headers, rows);
+        showAlert(`Exported ${rows.length} wishlist items`);
+    } catch (error) {
+        console.error("CSV export failed:", error);
+    }
 }
