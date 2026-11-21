@@ -98,7 +98,8 @@ if [ "$SCRIPT_DIR" != "$APP_DIR" ]; then
     echo "-> Copying code to $APP_DIR"
     tar -C "$SCRIPT_DIR" \
         --exclude=./data --exclude=./uploads --exclude=./node_modules \
-        --exclude=./.git --exclude=./screenshots --exclude='*.tmp' \
+        --exclude=./.git --exclude=./.github --exclude=./tests --exclude=./screenshots \
+        --exclude=./test-results --exclude=./playwright-report --exclude='*.tmp' \
         -cf - . | tar -C "$APP_DIR" --no-same-owner -xf -
 fi
 mkdir -p "$APP_DIR/data" "$APP_DIR/uploads/puzzles"

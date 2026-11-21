@@ -4,7 +4,10 @@
   "description": "Jigsaw puzzle inventory management system - SEHv1.06",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "npm run test:api && npm run test:ui",
+    "test:api": "node --test \"tests/api/*.test.js\"",
+    "test:ui": "playwright test"
   },
   "keywords": [
     "puzzle",
@@ -19,5 +22,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1"
   }
 }

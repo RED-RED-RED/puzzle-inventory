@@ -150,6 +150,12 @@ puzzle-inventory/
 │   ├── puzzle-inventory-backup.service   # Backup job template
 │   ├── puzzle-inventory-backup.timer     # Nightly schedule
 │   └── backup.sh                         # Archives data/ and uploads/
+├── tests/
+│   ├── api/                   # Server tests (node:test)
+│   ├── ui/                    # Browser tests (Playwright)
+│   └── start-server.js        # Starts the app against throwaway data folders
+├── playwright.config.js
+├── .github/workflows/test.yml # Runs the tests on every push
 ├── public/
 │   ├── index.html             # Frontend UI
 │   ├── styles.css             # All styling (gray tones, dark mode, phone layout)
@@ -172,6 +178,30 @@ puzzle-inventory/
 - Every change is a locked read-modify-write, so simultaneous saves from two devices cannot overwrite each other.
 - Files are written to a temp file, flushed to disk, then renamed into place. A crash or power cut leaves either the old file or the new one, never a half-written one.
 - If a data file is ever corrupt, the app refuses to save over it and will not start until it is fixed, so nothing is silently lost.
+
+---
+
+## Testing
+
+```bash
+npm install                            # includes the test tools
+npx playwright install chromium        # one time, downloads the test browser
+npm test                               # server tests, then browser tests
+npm run test:api                       # server tests only (a few seconds)
+npm run test:ui                        # browser tests only
+```
+
+The tests start their own copy of the app on port 3100 with empty, temporary data and photo folders, so they never touch your real puzzles. GitHub runs the same tests on every push (see the Actions tab). If a browser test fails there, the run has a `playwright-report` download with a trace of what the browser saw.
+
+The data and photo folders can be moved with environment variables. The defaults are inside the app folder.
+
+| Variable | Default |
+|---|---|
+| `DATA_DIR` | `./data` |
+| `UPLOADS_DIR` | `./uploads` |
+| `UPLOAD_TMP_DIR` | system temp folder |
+
+The installer leaves the tests out of `/opt/puzzle-inventory` and installs without the test tools.
 
 ---
 

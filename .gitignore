@@ -16,6 +16,10 @@ uploads/
 # Environment variables
 .env
 
+# Test output
+test-results/
+playwright-report/
+
 # Logs
 *.log
 npm-debug.log*

@@ -14,9 +14,11 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const UPLOADS_ROOT = path.join(__dirname, 'uploads');
+// Data and photo folders can be moved with environment variables (the tests
+// use this to run against throwaway folders). Defaults are inside the app folder.
+const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_DIR || path.join(__dirname, 'uploads'));
 const UPLOADS_DIR = path.join(UPLOADS_ROOT, 'puzzles');
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const DATA_FILE = path.join(DATA_DIR, 'puzzles.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const WISHLIST_FILE = path.join(DATA_DIR, 'wishlist.json');
@@ -26,7 +28,7 @@ const DEFAULT_SETTINGS = { brands: [], themes: [], series: [] };
 const DEFAULT_THEME = { primary: '#4e5d6c', secondary: '#4e5d6c', tone: 'warm' };
 const TONES = ['warm', 'cool'];
 
-const UPLOAD_TMP_DIR = path.join(os.tmpdir(), 'puzzle-inventory-uploads');
+const UPLOAD_TMP_DIR = path.resolve(process.env.UPLOAD_TMP_DIR || path.join(os.tmpdir(), 'puzzle-inventory-uploads'));
 
 const MAX_IMAGE_MB = 25;
 const MAX_IMAGES_PER_UPLOAD = 20;
