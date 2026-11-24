@@ -4,6 +4,13 @@
 - Automated server and browser tests (`npm test`), run by GitHub on every push
 - Data, photo and temp folders can be set with `DATA_DIR`, `UPLOADS_DIR` and `UPLOAD_TMP_DIR`
 - README rewritten with current screenshots; changelog moved here
+- Adding, deleting, rotating or changing the cover photo now updates the puzzle's overview straight away (it kept showing "No photos yet" until you left the page). Custom fields too.
+- If the server can't send the puzzles, the app says so instead of showing an empty collection
+- Quality ratings are checked on the server, including ones in restored backups
+- Rotated photos that fail to save now say why
+- Stats tab uses the same plain labels as the rest of the app
+- Updated express, multer and sharp to fix known security issues. Node 20 or newer is now required (22 recommended).
+- Installer no longer stops if a network-share backup folder can't change owner; it warns if backups can't be written there
 
 ### SEHv1.06 - 2026-11-21
 **New look:**

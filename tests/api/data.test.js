@@ -85,6 +85,13 @@ describe('restore from backup', () => {
         assert.equal(restored.logs.length, 1);
         assert.equal(restored.customFields[0].name, 'Box');
         assert.equal(restored.quality.qualityScore, 88);
+
+        // Quality data in a backup file is cleaned like anything else
+        backup.puzzles[0].quality = { qualityScore: '<b>99</b>', pieceFit: 3 };
+        await api.post('/restore', backup);
+        const again = (await api.get(`/puzzles/${p.id}`)).data;
+        assert.equal(again.quality.qualityScore, 0);
+        assert.equal(again.quality.pieceFit, 3);
         assert.ok(fs.existsSync(path.join(app.root, res.data.previousDataSavedTo)));
     });
 

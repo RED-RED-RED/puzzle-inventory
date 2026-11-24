@@ -241,6 +241,17 @@ function cleanWishlistItem(body) {
     };
 }
 
+// Quality ratings are 1-5 (0 = not rated) and the score is 0-100. Only known
+// keys are kept, so nothing unexpected is stored or shown on the page.
+const QUALITY_RATINGS = ['pieceFit', 'cutQuality', 'imageSharpness', 'thickness', 'finish', 'shapeVariety', 'falseFits', 'colorQuality', 'alignment', 'packaging'];
+function cleanQuality(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Invalid quality data');
+    const out = {};
+    for (const key of QUALITY_RATINGS) out[key] = intInRange(body[key], 0, 5, 0);
+    out.qualityScore = intInRange(body.qualityScore, 0, 100, 0);
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Images
 // ---------------------------------------------------------------------------
@@ -281,7 +292,7 @@ async function processImages(puzzleId, files) {
             const filename = `${puzzleId}_${nextId()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
             try {
                 await sharp(file.path)
-                    .rotate()
+                    .autoOrient()
                     .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
                     .jpeg({ quality: 85 })
                     .toFile(path.join(UPLOADS_DIR, filename));
@@ -364,7 +375,7 @@ function normalizeRestoredPuzzle(p, usedIds) {
         thumbnailIndex: Number(p.thumbnailIndex) || 0,
         createdAt: p.createdAt || new Date().toISOString()
     };
-    if (p.quality && typeof p.quality === 'object') restored.quality = p.quality;
+    if (p.quality && typeof p.quality === 'object' && !Array.isArray(p.quality)) restored.quality = cleanQuality(p.quality);
     clampThumbnail(restored);
     return restored;
 }
@@ -494,10 +505,9 @@ app.put('/api/puzzles/:id/thumbnail', express.json(), async (req, res) => {
 
 app.put('/api/puzzles/:id/quality', express.json(), async (req, res) => {
     try {
-        const body = req.body;
-        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Invalid quality data');
+        const quality = cleanQuality(req.body);
         await mutatePuzzle(parseId(req.params.id), p => {
-            p.quality = body;
+            p.quality = quality;
         });
         res.json({ success: true });
     } catch (err) {

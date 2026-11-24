@@ -61,6 +61,21 @@ describe('puzzles', () => {
         assert.equal(data.missingPieceCount, 0);
     });
 
+    it('keeps only valid quality ratings', async () => {
+        const { data: p } = await api.post('/puzzles', { name: 'Quality', pieces: 500 });
+        const res = await api.put(`/puzzles/${p.id}/quality`, {
+            pieceFit: 5, cutQuality: '4', thickness: 9, qualityScore: '<img src=x onerror=alert(1)>', extra: 'x'
+        });
+        assert.equal(res.status, 200);
+        const { quality } = (await api.get(`/puzzles/${p.id}`)).data;
+        assert.equal(quality.pieceFit, 5);
+        assert.equal(quality.cutQuality, 4);
+        assert.equal(quality.thickness, 0, 'out of range becomes not rated');
+        assert.equal(quality.qualityScore, 0, 'a non-number score is not stored');
+        assert.equal(quality.extra, undefined);
+        assert.equal((await api.put(`/puzzles/${p.id}/quality`, [1, 2])).status, 400);
+    });
+
     it('returns 404 for unknown puzzles and API paths', async () => {
         assert.equal((await api.get('/puzzles/123')).status, 404);
         assert.equal((await api.get('/nope')).status, 404);

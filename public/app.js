@@ -1,4 +1,5 @@
 let puzzles = [];
+let puzzlesLoadFailed = false; // true when the server could not be reached or returned an error
 let currentPuzzleId = null;
 let currentRating = 0;
 let currentLogRating = 0;
@@ -202,7 +203,7 @@ function editWishlistItem(id) {
     document.getElementById('wishlistWhereToBuy').value = item.whereToBuy || '';
     document.getElementById('wishlistUrl').value = item.url || '';
     document.getElementById('wishlistPrice').value = item.price || '';
-    document.getElementById('wishlistPriority').value = item.priority;
+    document.getElementById('wishlistPriority').value = item.priority || 'medium';
     document.getElementById('wishlistNotes').value = item.notes || '';
     showModal('wishlistModal');
 }
@@ -595,6 +596,11 @@ function showSettings() {
 
 // Render dashboard
 function renderDashboard() {
+    if (puzzlesLoadFailed) {
+        document.getElementById('dashboardStats').innerHTML = '';
+        document.getElementById('recentPuzzleGrid').innerHTML = LOAD_FAILED_HTML;
+        return;
+    }
     const allLogs = puzzles.flatMap(p => p.logs || []);
     const totalHours = allLogs.reduce((sum, log) => sum + (log.time || 0), 0);
     const ratedPuzzles = puzzles.filter(p => p.rating > 0);
@@ -689,11 +695,20 @@ function showAlert(message, type = 'success') {
 async function loadPuzzles() {
     try {
         puzzles = await apiRequest('/api/puzzles');
-        renderPuzzleList();
+        puzzlesLoadFailed = false;
     } catch (error) {
         console.error('Failed to load puzzles:', error);
+        puzzlesLoadFailed = true;
     }
+    renderPuzzleList();
 }
+
+const LOAD_FAILED_HTML = `
+    <div class="empty-state" style="grid-column: 1 / -1;">
+        <h3>Couldn't load your puzzles</h3>
+        <p>Your puzzles are safe, but the server didn't send them. Check that it's running, then reload the page.</p>
+    </div>
+`;
 
 // Show modal
 function showModal(modalId) {
@@ -833,9 +848,10 @@ function editPuzzle() {
 }
 
 // Upload image files to a puzzle. Throws with the server's message on failure.
-async function uploadImages(puzzleId, files) {
+async function uploadImages(puzzleId, files, extraFields = {}) {
     const formData = new FormData();
-    for (const file of files) formData.append("images", file);
+    for (const file of files) formData.append("images", file, file.name || "photo.jpg");
+    for (const [key, value] of Object.entries(extraFields)) formData.append(key, value);
     const response = await fetch(`/api/puzzles/${puzzleId}/images`, { method: "POST", body: formData });
     if (!response.ok) {
         const err = await response.json().catch(() => ({}));
@@ -1064,6 +1080,12 @@ function renderPuzzleList() {
     const countEl = document.getElementById("listCount");
     refreshBrandFilterOptions();
 
+    if (puzzlesLoadFailed) {
+        countEl.textContent = "";
+        listContainer.innerHTML = LOAD_FAILED_HTML;
+        return;
+    }
+
     if (!puzzles || puzzles.length === 0) {
         countEl.textContent = "";
         listContainer.innerHTML = `
@@ -1160,7 +1182,8 @@ function renderOverview(puzzle) {
     if (puzzle.missingPieces) tags.push(`<span class="tag tag-danger">${puzzle.missingPieceCount > 0 ? plural(puzzle.missingPieceCount, 'piece') + ' missing' : 'Missing pieces'}</span>`);
     if (puzzle.passesPickup) tags.push('<span class="tag tag-ok">Passes pickup test</span>');
     if (puzzle.donated) tags.push('<span class="tag">Donated</span>');
-    if (puzzle.quality && puzzle.quality.qualityScore > 0) tags.push(`<span class="tag">Quality ${puzzle.quality.qualityScore} of 100</span>`);
+    const qualityScore = Number(puzzle.quality && puzzle.quality.qualityScore) || 0;
+    if (qualityScore > 0) tags.push(`<span class="tag">Quality ${qualityScore} of 100</span>`);
 
     const row = (label, value) => value ? `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>` : '';
     const about = [
@@ -1198,6 +1221,14 @@ function renderOverview(puzzle) {
     `;
 }
 
+// After a photo change, refresh everything that shows photos
+function renderPhotos(puzzle) {
+    renderOverview(puzzle);
+    renderImages(puzzle);
+    renderStats(puzzle);
+    renderPuzzleList();
+}
+
 // Handle image upload
 async function handleImageUpload(event) {
     const files = Array.from(event.target.files || []);
@@ -1206,11 +1237,8 @@ async function handleImageUpload(event) {
 
     try {
         await uploadImages(currentPuzzleId, files);
-        showAlert(`${files.length} image(s) uploaded successfully!`);
-        const puzzle = await refreshPuzzle();
-        renderImages(puzzle);
-        renderStats(puzzle);
-        renderPuzzleList();
+        showAlert(files.length === 1 ? 'Photo added' : `${files.length} photos added`);
+        renderPhotos(await refreshPuzzle());
     } catch (error) {
         console.error("Failed to upload images:", error);
         showAlert(`Failed to upload images: ${error.message}`, "error");
@@ -1255,11 +1283,8 @@ async function deleteImage(index) {
             method: 'DELETE'
         });
 
-        showAlert('Image deleted successfully!');
-        const puzzle = await refreshPuzzle();
-        renderImages(puzzle);
-        renderStats(puzzle);
-        renderPuzzleList();
+        showAlert('Photo deleted');
+        renderPhotos(await refreshPuzzle());
     } catch (error) {
         console.error('Failed to delete image:', error);
     }
@@ -1495,9 +1520,10 @@ async function saveCustomField(event) {
             body: JSON.stringify(fieldData)
         });
 
-        showAlert('Custom field added successfully!');
+        showAlert('Custom field added');
         const puzzle = await refreshPuzzle();
         renderCustomFields(puzzle);
+        renderOverview(puzzle);
         closeModal('customFieldModal');
     } catch (error) {
         console.error('Failed to save custom field:', error);
@@ -1530,9 +1556,10 @@ async function deleteCustomField(fieldId) {
             method: 'DELETE'
         });
 
-        showAlert('Custom field deleted successfully!');
+        showAlert('Custom field removed');
         const puzzle = await refreshPuzzle();
         renderCustomFields(puzzle);
+        renderOverview(puzzle);
     } catch (error) {
         console.error('Failed to delete custom field:', error);
     }
@@ -1548,15 +1575,16 @@ function renderStats(puzzle) {
     const fastestTime = timed.length ? Math.min(...timed.map(l => l.time)) : 0;
     const avgRating = rated.length ? (rated.reduce((sum, l) => sum + l.rating, 0) / rated.length).toFixed(1) : null;
 
+    const none = "–";
     document.getElementById("statsGrid").innerHTML = `
-        <div class="stat-card"><h3>${logs.length}</h3><p>Times Completed</p></div>
-        <div class="stat-card"><h3>${timed.length ? formatTime(totalTime) : "N/A"}</h3><p>Total Time</p></div>
-        <div class="stat-card"><h3>${avgTime ? formatTime(avgTime) : "N/A"}</h3><p>Average Time</p></div>
-        <div class="stat-card"><h3>${fastestTime ? formatTime(fastestTime) : "N/A"}</h3><p>Fastest Time</p></div>
-        <div class="stat-card"><h3>${avgRating || "N/A"}</h3><p>Average Rating</p></div>
-        <div class="stat-card"><h3>${(puzzle.images || []).length}</h3><p>Images</p></div>
+        <div class="stat-card"><h3>${logs.length}</h3><p>Times completed</p></div>
+        <div class="stat-card"><h3>${timed.length ? formatTime(totalTime) : none}</h3><p>Total time</p></div>
+        <div class="stat-card"><h3>${avgTime ? formatTime(avgTime) : none}</h3><p>Average time</p></div>
+        <div class="stat-card"><h3>${fastestTime ? formatTime(fastestTime) : none}</h3><p>Fastest time</p></div>
+        <div class="stat-card"><h3>${avgRating || none}</h3><p>Average rating</p></div>
+        <div class="stat-card"><h3>${(puzzle.images || []).length}</h3><p>Photos</p></div>
         <div class="stat-card"><h3>${puzzle.donated ? "Yes" : "No"}</h3><p>Donated</p></div>
-        <div class="stat-card"><h3>${puzzle.puzzleDust ? escapeHtml(puzzle.puzzleDust) : "N/A"}</h3><p>Puzzle Dust</p></div>
+        <div class="stat-card"><h3>${puzzle.puzzleDust ? escapeHtml(puzzle.puzzleDust) : none}</h3><p>Puzzle dust</p></div>
     `;
 }
 
@@ -1605,23 +1633,8 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
     navigator.serviceWorker.register("/sw.js").catch(err => console.warn("Service worker not registered:", err));
 }
 
-Promise.all([
-    loadTheme().catch(err => console.error('Theme load error:', err)),
-    loadSettings().catch(err => console.error('Settings load error:', err)),
-    loadWishlist().catch(err => console.error('Wishlist load error:', err)),
-    loadPuzzles().catch(err => console.error('Puzzles load error:', err))
-]).then(() => {
-    renderDashboard();
-}).catch(error => {
-    console.error('Critical initialization error:', error);
-    // Show error in UI
-    document.getElementById('puzzleList').innerHTML = `
-        <div class="empty-state">
-            <h3>Couldn't load your puzzles</h3>
-            <p>Check that the server is running, then reload the page.</p>
-        </div>
-    `;
-});
+// Each loader handles its own errors, so one failure doesn't stop the rest
+Promise.all([loadTheme(), loadSettings(), loadWishlist(), loadPuzzles()]).then(renderDashboard);
 
 // Toggle initial log fields
 function toggleInitialLogFields() {
@@ -1767,28 +1780,13 @@ async function saveEditedImage() {
         // Convert canvas to blob
         const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
         
-        // Upload the edited image
-        const formData = new FormData();
-        formData.append('images', blob, 'edited.jpg');
-        formData.append('replaceIndex', currentEditingImageIndex);
-        
-        const response = await fetch(`/api/puzzles/${currentPuzzleId}/images`, {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!response.ok) throw new Error('Failed to save edited image');
-        
-        showAlert('Image updated successfully!');
+        await uploadImages(currentPuzzleId, [blob], { replaceIndex: currentEditingImageIndex });
+        showAlert('Photo saved');
         closeImageEditor();
-        
-        // Refresh images
-        const puzzle = await refreshPuzzle();
-        renderImages(puzzle);
-        renderPuzzleList();
+        renderPhotos(await refreshPuzzle());
     } catch (error) {
         console.error('Failed to save edited image:', error);
-        showAlert('Failed to save edited image', 'error');
+        showAlert(`Could not save the photo: ${error.message}`, 'error');
     }
 }
 
@@ -1800,11 +1798,8 @@ async function setThumbnail(imageIndex) {
             body: JSON.stringify({ thumbnailIndex: imageIndex })
         });
         
-        showAlert('Thumbnail updated!');
-        
-        const puzzle = await refreshPuzzle();
-        renderImages(puzzle);
-        renderPuzzleList();
+        showAlert('Cover photo changed');
+        renderPhotos(await refreshPuzzle());
     } catch (error) {
         console.error('Failed to set thumbnail:', error);
     }

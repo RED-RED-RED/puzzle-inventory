@@ -144,3 +144,48 @@ test('puzzle page leads with the cover photo, or offers to add one', async ({ pa
     const notesHeight = await page.locator('.overview-notes').evaluate(e => e.getBoundingClientRect().height);
     expect(notesHeight).toBeGreaterThan(30); // line breaks kept
 });
+
+test('adding, changing and deleting photos updates the puzzle page', async ({ page, api }) => {
+    const { makeJpeg } = require('../helpers');
+    const p = await api.addPuzzle({ name: 'Photo Page', pieces: 500 });
+    await openApp(page);
+    await page.evaluate(id => showPuzzleDetail(id), p.id);
+    await expect(page.locator('#puzzleOverview')).toContainText('No photos yet');
+
+    // Add photos from the overview's own button
+    const chooser = page.waitForEvent('filechooser');
+    await page.click('#puzzleOverview label[for=imageInput]');
+    await (await chooser).setFiles([
+        { name: 'a.jpg', mimeType: 'image/jpeg', buffer: await makeJpeg(300, 200) },
+        { name: 'b.jpg', mimeType: 'image/jpeg', buffer: await makeJpeg(200, 300) }
+    ]);
+    const cover = page.locator('#puzzleOverview img.overview-photo');
+    await expect(cover).toHaveCount(1);
+    await expect(page.locator('#puzzleOverview')).not.toContainText('No photos yet');
+    const first = await cover.getAttribute('src');
+
+    await page.click('.tab:has-text("Photos")');
+    await page.locator('.image-item').nth(1).locator('button[title="Use as cover"]').click();
+    await expect(cover).not.toHaveAttribute('src', first);
+    await expect(page.locator('#puzzleList .puzzle-item.active img')).toHaveAttribute('src', await cover.getAttribute('src'));
+
+    await page.locator('.image-item').nth(1).locator('.delete-image').click();
+    await expect(page.locator('.image-item')).toHaveCount(1);
+    await expect(cover).toHaveAttribute('src', first);
+
+    // Rotating a photo replaces the cover with the rotated copy
+    await page.locator('.image-item').first().locator('button[title="Rotate"]').click();
+    await page.evaluate(() => rotateImage(90));
+    await page.click('#imageEditor button:has-text("Save")');
+    await expect(cover).not.toHaveAttribute('src', first);
+    const size = await cover.evaluate(img => img.complete ? [img.naturalWidth, img.naturalHeight] : null);
+    expect(size === null || size[0] < size[1]).toBe(true);
+});
+
+test('a server problem says so instead of showing an empty collection', async ({ page }) => {
+    await page.route('**/api/puzzles', route => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"Failed to retrieve puzzles"}' }));
+    await openApp(page);
+    await expect(page.locator('#recentPuzzleGrid')).toContainText("Couldn't load your puzzles");
+    await expect(page.locator('#puzzleList')).toContainText("Couldn't load your puzzles");
+    await expect(page.locator('#recentPuzzleGrid')).not.toContainText('No puzzles yet');
+});

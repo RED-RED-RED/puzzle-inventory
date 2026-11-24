@@ -63,8 +63,8 @@ case "$NODE_BIN" in
         ;;
 esac
 NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" -lt 18 ]; then
-    echo "Node.js $("$NODE_BIN" -v) is too old. Version 18 or newer is required."
+if [ "$NODE_MAJOR" -lt 20 ]; then
+    echo "Node.js $("$NODE_BIN" -v) is too old. Version 20 or newer is required (22 recommended)."
     exit 1
 fi
 NPM_BIN="$(dirname "$NODE_BIN")/npm"
@@ -130,7 +130,14 @@ fill "$APP_DIR/deploy/puzzle-inventory-backup.service" > /etc/systemd/system/puz
 cp "$APP_DIR/deploy/puzzle-inventory-backup.timer"      /etc/systemd/system/puzzle-inventory-backup.timer
 
 mkdir -p "$BACKUP_DIR"
-chown "$APP_USER:$APP_USER" "$BACKUP_DIR"
+# A NAS share may not allow chown (NFS root_squash, CIFS); the backup job only needs write access
+if ! chown "$APP_USER:$APP_USER" "$BACKUP_DIR" 2>/dev/null; then
+    echo "   Note: could not change the owner of $BACKUP_DIR (normal for some network shares)."
+fi
+if ! runuser -u "$APP_USER" -- test -w "$BACKUP_DIR"; then
+    echo "   WARNING: the '$APP_USER' user cannot write to $BACKUP_DIR, so nightly backups will fail."
+    echo "   Fix the share's permissions or mount options, then run: sudo systemctl start puzzle-inventory-backup"
+fi
 
 systemctl daemon-reload
 systemctl enable --quiet puzzle-inventory puzzle-inventory-backup.timer
